@@ -27,5 +27,7 @@ torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
 --k_groupsize 128 \
 --v_groupsize 128 \
 --rotate \
---optimized_rotation_path "your_path/R.bin" \
+--optimized_rotation_path "rotation_llama-2-7b/R_488.bin" \
+--load_qmodel_path "saved_models/qllama2-7b-4-8-8-128.pt" \
 
+# --save_qmodel_path "saved_models/qllama2-7b-4-8-8-128.pt"

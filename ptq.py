@@ -19,14 +19,42 @@ from utils.process_args import process_args_ptq
 
 log: Logger = utils.get_logger("spinquant")
 
+import evaluate
+from lm_eval import evaluator
+from lm_eval.utils import make_table
+
+from utils.quant_utils import find_qlayers, ActQuantWrapper
+from functools import partial
+import pickle
+import os
+
+task_names = ['hellaswag', 'arc_easy','arc_challenge', 'winogrande', 'openbookqa']
+# task_names = ['openbookqa']
+# task_names = ['arc_easy']
+
+CUDA_DEVICES = list(map(str.strip, os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")))
+FIRST_GPU_ID = int(CUDA_DEVICES[0])
+print(FIRST_GPU_ID)
+
+# os.environ["CUDA_VISIBLE_DEVICES"] = str(FIRST_GPU_ID)
+# os.environ["LOCAL_RANK"] = str(FIRST_GPU_ID)
 
 def train() -> None:
     dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=8))
     model_args, training_args, ptq_args = process_args_ptq()
+    print("------- ARGS ----------")
+    print("-----model args-----")
+    print(model_args)
+    print("------train args-------")
+    print(training_args)
+    print("-------- ptq args ---------")
+    print(ptq_args)
+    print("------- ARGS END ----------")
+
     local_rank = utils.get_local_rank()
 
     log.info("the rank is {}".format(local_rank))
-    torch.distributed.barrier()
+    torch.distributed.barrier(device_ids=[3])
 
     config = transformers.AutoConfig.from_pretrained(
         model_args.input_model, token=model_args.access_token
@@ -45,9 +73,14 @@ def train() -> None:
     )
     if process_word_embeddings:
         model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
-    model.cuda()
+    model.cuda(3)
 
-    model = ptq_model(ptq_args, model, model_args)
+    model, quantizer_state_dict = ptq_model(ptq_args, model, model_args)
+
+    # for l, layer in enumerate(model.model.layers):
+    #     layer.self_attn.q_proj.quantizer.register_forward_hook(partial(forward_hook_act_quant, name=name))
+    #     layer.self_attn.q_proj.register_forward_hook(forward_hook_weight_quant)
+    
     model.seqlen = training_args.model_max_length
     if local_rank == 0:
         log.info("Model PTQ completed {}".format(model))
@@ -65,17 +98,32 @@ def train() -> None:
     log.info("Complete tokenizer loading...")
     model.config.use_cache = False
 
-    testloader = data_utils.get_wikitext2(
-        seed=ptq_args.seed,
-        seqlen=2048,
-        tokenizer=tokenizer,
-        eval_mode=True,
-    )
+    try:
+      results = evaluator.simple_evaluate(
+          model="hf",
+          model_args={"pretrained" : model.to("cuda"),
+                      "tokenizer" : tokenizer},
+          tasks=task_names,
+          num_fewshot=0,
+          batch_size="auto",
+          device="cuda",
+          limit=1
+      )
+      print(make_table(results))
+    except Exception as e:
+      print("Error in evaluation")
+      print(e)
 
-    dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, ptq_args)
-    log.info("wiki2 ppl is: {}".format(dataset_ppl))
-    dist.barrier()
+    # testloader = data_utils.get_wikitext2(
+    #     seed=ptq_args.seed,
+    #     seqlen=2048,
+    #     tokenizer=tokenizer,
+    #     eval_mode=True,
+    # )
 
+    # dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, ptq_args)
+    # log.info("wiki2 ppl is: {}".format(dataset_ppl))
+    dist.barrier(device_ids=[3])
 
 if __name__ == "__main__":
     train()
