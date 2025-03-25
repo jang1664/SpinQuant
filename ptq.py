@@ -35,6 +35,7 @@ task_names = ['hellaswag', 'arc_easy','arc_challenge', 'winogrande', 'openbookqa
 CUDA_DEVICES = list(map(str.strip, os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")))
 FIRST_GPU_ID = int(CUDA_DEVICES[0])
 print(FIRST_GPU_ID)
+GPU_ID = 0
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = str(FIRST_GPU_ID)
 # os.environ["LOCAL_RANK"] = str(FIRST_GPU_ID)
@@ -54,7 +55,7 @@ def train() -> None:
     local_rank = utils.get_local_rank()
 
     log.info("the rank is {}".format(local_rank))
-    torch.distributed.barrier(device_ids=[3])
+    torch.distributed.barrier(device_ids=[GPU_ID])
 
     config = transformers.AutoConfig.from_pretrained(
         model_args.input_model, token=model_args.access_token
@@ -73,9 +74,9 @@ def train() -> None:
     )
     if process_word_embeddings:
         model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
-    model.cuda(3)
+    model.cuda(GPU_ID)
 
-    model, quantizer_state_dict = ptq_model(ptq_args, model, model_args)
+    model = ptq_model(ptq_args, model, model_args)
 
     # for l, layer in enumerate(model.model.layers):
     #     layer.self_attn.q_proj.quantizer.register_forward_hook(partial(forward_hook_act_quant, name=name))
@@ -123,7 +124,7 @@ def train() -> None:
 
     # dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, ptq_args)
     # log.info("wiki2 ppl is: {}".format(dataset_ppl))
-    dist.barrier(device_ids=[3])
+    dist.barrier(device_ids=[GPU_ID])
 
 if __name__ == "__main__":
     train()

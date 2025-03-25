@@ -51,7 +51,7 @@ def ptq_model(args, model, model_args=None):
                 not args.save_qmodel_path
             ), "Cannot save a quantized model if it is already loaded!"
             print("Load quantized model from ", args.load_qmodel_path)
-            save_dict = torch.load(args.load_qmodel_path)
+            save_dict = torch.load(args.load_qmodel_path, weights_only=False)
             model.load_state_dict(save_dict["model"])
 
         elif not args.w_rtn:  # GPTQ Weight Quantization
