@@ -4,7 +4,6 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
 import datetime
 from logging import Logger
 
@@ -28,7 +27,7 @@ from functools import partial
 import pickle
 import os
 
-task_names = ['hellaswag', 'arc_easy','arc_challenge', 'winogrande', 'openbookqa']
+task_names = ['hellaswag', 'arc_easy','arc_challenge', 'winogrande', 'openbookqa', "wikitext"]
 # task_names = ['openbookqa']
 # task_names = ['arc_easy']
 
@@ -55,7 +54,7 @@ def train() -> None:
     local_rank = utils.get_local_rank()
 
     log.info("the rank is {}".format(local_rank))
-    torch.distributed.barrier(device_ids=[GPU_ID])
+    torch.distributed.barrier()
 
     config = transformers.AutoConfig.from_pretrained(
         model_args.input_model, token=model_args.access_token
@@ -74,7 +73,7 @@ def train() -> None:
     )
     if process_word_embeddings:
         model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
-    model.cuda(GPU_ID)
+    model.cuda()
 
     model = ptq_model(ptq_args, model, model_args)
 
@@ -108,7 +107,7 @@ def train() -> None:
           num_fewshot=0,
           batch_size="auto",
           device="cuda",
-          limit=1
+          limit=128
       )
       print(make_table(results))
     except Exception as e:
@@ -124,7 +123,7 @@ def train() -> None:
 
     # dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, ptq_args)
     # log.info("wiki2 ppl is: {}".format(dataset_ppl))
-    dist.barrier(device_ids=[GPU_ID])
+    dist.barrier()
 
 if __name__ == "__main__":
     train()

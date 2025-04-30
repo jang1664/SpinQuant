@@ -7,6 +7,7 @@
 
 # nnodes determines the number of GPU nodes to utilize (usually 1 for an 8 GPU node)
 # nproc_per_node indicates the number of GPUs per node to employ.
+export CUDA_VISIBLE_DEVICES=0
 torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
 --input_model $1 \
 --do_train False \
@@ -27,7 +28,7 @@ torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
 --k_groupsize 128 \
 --v_groupsize 128 \
 --rotate \
---optimized_rotation_path "rotation_llama-2-7b/R_488.bin" \
---load_qmodel_path "saved_models/qllama2-7b-4-8-8-128.pt" \
+--load_qmodel_path "saved_models/qllama2-7b-4-8-8-128-a16.pt" \
+--optimized_rotation_path "rotation_llama-2-7b/a16w4/R.bin" \
 
-# --save_qmodel_path "saved_models/qllama2-7b-4-8-8-128.pt"
+# --save_qmodel_path "saved_models/qllama2-7b-4-8-8-128-a16.pt" \
