@@ -41,11 +41,19 @@ class HadamardTransform(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, u):
-        return hadamard_transform(u)
+        if u.is_cuda:
+          return hadamard_transform(u)
+        else:
+          from utils.hadamard_utils import matmul_hadU
+          return matmul_hadU(u) 
 
     @staticmethod
     def backward(ctx, grad):
-        return hadamard_transform(grad)
+        if grad.is_cuda:
+          return hadamard_transform(grad)
+        else:
+          from utils.hadamard_utils import matmul_hadU
+          return matmul_hadU(grad)
 
 
 def llama_down_proj_groupsize(model, groupsize):

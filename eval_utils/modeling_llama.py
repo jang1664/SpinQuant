@@ -50,6 +50,8 @@ from transformers.utils import (
 )
 from transformers.models.llama.configuration_llama import LlamaConfig
 
+from utils.profile import measure
+
 
 logger = logging.get_logger(__name__)
 
@@ -130,11 +132,13 @@ class LlamaRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        with measure("rmsnorm"):
+          input_dtype = hidden_states.dtype
+          hidden_states = hidden_states.to(torch.float32)
+          variance = hidden_states.pow(2).mean(-1, keepdim=True)
+          hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+          result = self.weight * hidden_states.to(input_dtype) 
+        return result
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
@@ -352,7 +356,18 @@ class LlamaMLP(nn.Module):
             ]
             down_proj = sum(down_proj)
         else:
-            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+            with measure("upproj"):
+              up = self.up_proj(x)
+            with measure("gateproj"):
+              gate = self.gate_proj(x)
+            with measure("actfn"):
+              act_value = self.act_fn(gate)
+            with measure("mlpmul"):
+              mul_value = act_value * up
+            with measure("downproj"):
+              down_proj = self.down_proj(mul_value)
+
+            # down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
         return down_proj
 
@@ -460,19 +475,23 @@ class LlamaAttention(nn.Module):
             value_states = torch.cat(value_states, dim=-1)
 
         else:
-            query_states = self.q_proj(hidden_states)
-            key_states = self.k_proj(hidden_states)
-            value_states = self.v_proj(hidden_states)
+            with measure("qproj"):
+                query_states = self.q_proj(hidden_states)
+            with measure("kproj"):
+              key_states = self.k_proj(hidden_states)
+            with measure("vproj"):
+              value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(
-            bsz, q_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
-        value_states = value_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
+        with measure("head_reshape"):
+          query_states = query_states.view(
+              bsz, q_len, self.num_heads, self.head_dim
+          ).transpose(1, 2)
+          key_states = key_states.view(
+              bsz, q_len, self.num_key_value_heads, self.head_dim
+          ).transpose(1, 2)
+          value_states = value_states.view(
+              bsz, q_len, self.num_key_value_heads, self.head_dim
+          ).transpose(1, 2)
 
         if position_embeddings is None:
             logger.warning_once(
@@ -484,9 +503,10 @@ class LlamaAttention(nn.Module):
             cos, sin = self.rotary_emb(value_states, position_ids)
         else:
             cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin
-        )
+        with measure("apply_rope"):
+          query_states, key_states = apply_rotary_pos_emb(
+              query_states, key_states, cos, sin
+          )
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -495,24 +515,30 @@ class LlamaAttention(nn.Module):
                 key_states, value_states, self.layer_idx, cache_kwargs
             )
 
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-        attn_weights = torch.matmul(
-            query_states, key_states.transpose(2, 3)
-        ) / math.sqrt(self.head_dim)
+        with measure("head_kv_repeat"):
+          key_states = repeat_kv(key_states, self.num_key_value_groups)
+          value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
+        with measure("attn_weights_cal"):
+          attn_weights = torch.matmul(
+              query_states, key_states.transpose(2, 3)
+          ) / math.sqrt(self.head_dim)
+
+          if attention_mask is not None:  # no matter the length, we just slice it
+              causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+              attn_weights = attn_weights + causal_mask
 
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(
-            attn_weights, dim=-1, dtype=torch.float32
-        ).to(query_states.dtype)
+        with measure("softmax"):
+          attn_weights = nn.functional.softmax(
+              attn_weights, dim=-1, dtype=torch.float32
+          ).to(query_states.dtype)
         attn_weights = nn.functional.dropout(
             attn_weights, p=self.attention_dropout, training=self.training
         )
-        attn_output = torch.matmul(attn_weights, value_states)
+
+        with measure("attn_output"):
+          attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -520,9 +546,10 @@ class LlamaAttention(nn.Module):
                 f" {attn_output.size()}"
             )
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
+        with measure("attn_output_reshape"):
+          attn_output = attn_output.transpose(1, 2).contiguous()
 
-        attn_output = attn_output.reshape(bsz, q_len, -1)
+          attn_output = attn_output.reshape(bsz, q_len, -1)
 
         if self.config.pretraining_tp > 1:
             attn_output = attn_output.split(
@@ -538,7 +565,8 @@ class LlamaAttention(nn.Module):
                 ]
             )
         else:
-            attn_output = self.o_proj(attn_output)
+            with measure("oproj"):
+              attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
@@ -719,9 +747,12 @@ class LlamaSdpaAttention(LlamaAttention):
 
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        with measure("qproj"):
+          query_states = self.q_proj(hidden_states)
+        with measure("kproj"):
+          key_states = self.k_proj(hidden_states)
+        with measure("vproj"):
+          value_states = self.v_proj(hidden_states)
 
         query_states = query_states.view(
             bsz, q_len, self.num_heads, self.head_dim
@@ -743,9 +774,10 @@ class LlamaSdpaAttention(LlamaAttention):
             cos, sin = self.rotary_emb(value_states, position_ids)
         else:
             cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin
-        )
+        with measure("apply_rope"):
+          query_states, key_states = apply_rotary_pos_emb(
+              query_states, key_states, cos, sin
+          )
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -772,19 +804,21 @@ class LlamaSdpaAttention(LlamaAttention):
         # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
         is_causal = True if causal_mask is None and q_len > 1 else False
 
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=causal_mask,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=is_causal,
-        )
+        with measure("sdpa"):
+          attn_output = torch.nn.functional.scaled_dot_product_attention(
+              query_states,
+              key_states,
+              value_states,
+              attn_mask=causal_mask,
+              dropout_p=self.attention_dropout if self.training else 0.0,
+              is_causal=is_causal,
+          )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, -1)
 
-        attn_output = self.o_proj(attn_output)
+        with measure("oproj"):
+          attn_output = self.o_proj(attn_output)
 
         return attn_output, None, past_key_value
 
@@ -1084,7 +1118,8 @@ class LlamaModel(LlamaPreTrainedModel):
             use_cache = False
 
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            with measure("embed_tokens"):
+              inputs_embeds = self.embed_tokens(input_ids)
 
         return_legacy_cache = False
         if (
@@ -1109,17 +1144,19 @@ class LlamaModel(LlamaPreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        causal_mask = self._update_causal_mask(
-            attention_mask,
-            inputs_embeds,
-            cache_position,
-            past_key_values,
-            output_attentions,
-        )
+        with measure("attn_mask_cal"):
+          causal_mask = self._update_causal_mask(
+              attention_mask,
+              inputs_embeds,
+              cache_position,
+              past_key_values,
+              output_attentions,
+          )
         hidden_states = inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        with measure("rope_param_cal"):
+          position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -1384,7 +1421,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
                 )
             # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
             # TODO: remove the float() operation in v4.46
-            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :]).float()
+            with measure("lm_head"):
+              logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :]).float()
 
         loss = None
         if labels is not None:
