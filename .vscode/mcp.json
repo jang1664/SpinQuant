@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "my-mcp-server-2107a8b5": {
+      "type": "stdio",
+      "command": "ls",
+      "args": []
+    }
+  }
+}
