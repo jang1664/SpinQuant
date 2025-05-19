@@ -11,6 +11,7 @@
 
 import torch
 from utils.utils import HadamardTransform
+from utils.profile import measure, profile
 
 
 def get_hadK(n, transpose=False):
@@ -86,7 +87,7 @@ def get_hadK(n, transpose=False):
 def matmul_hadU(X, transpose=False):
     n = X.shape[-1]
     hadK, K = get_hadK(n, transpose)
-    input = X.clone().view(-1, n, 1)
+    input = X.clone().reshape(-1, n, 1)
     output = input.clone()
     while input.shape[1] > K:
         input = input.view(input.shape[0], input.shape[1] // 2, 2, input.shape[2])
@@ -125,6 +126,7 @@ def hadamard_matrix(size, device):
     return matmul_hadU(Q).to(device)
 
 
+@profile("matmul_hadU_cuda")
 def matmul_hadU_cuda(X, hadK, K):
     n = X.shape[-1]
     if K == 1:
@@ -141,6 +143,7 @@ def matmul_hadUt_cuda(X, hadK, K):
     return matmul_hadU_cuda(X, hadK, K, transpose=True)
 
 
+@profile("apply_exact_had_to_linear")
 def apply_exact_had_to_linear(module, had_dim=-1, output=False, R2=None):
     assert isinstance(module, torch.nn.Linear)
     in_features, out_features = module.in_features, module.out_features

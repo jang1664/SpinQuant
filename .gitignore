@@ -1,10 +1,16 @@
 __pycache__/
-rotation_llama-2-7b/
-saved_models/
+rotation_llama-2-7b
+saved_models
 *.log
 logs/
 outputs/
 fast-hadamard-transform/
 
+# model snapshots
 llama2-7b
 llama3.1-8b
+models/
+llama2-7b
+
+# profile results
+prof/
