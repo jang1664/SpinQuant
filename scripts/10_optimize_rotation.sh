@@ -35,15 +35,15 @@
 # --k_groupsize 128 \
 # --v_groupsize 128 \
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=3
 torchrun --nnodes=1 --nproc_per_node=1 optimize_rotation.py \
 --input_model $1  \
---output_rotation_path "rotation_llama-2-7b/a16w4" \
+--output_rotation_path "rotation_llama-2-7b/a16w4kv4_fp16" \
 --output_dir "./outputs/" \
 --logging_dir "./logs/" \
 --model_max_length 2048 \
---fp16 False \
---bf16 True \
+--fp16 True \
+--bf16 False \
 --log_on_each_node False \
 --per_device_train_batch_size 1 \
 --logging_steps 1 \

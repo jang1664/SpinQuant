@@ -106,8 +106,7 @@ def train() -> None:
           tasks=task_names,
           num_fewshot=0,
           batch_size="auto",
-          device="cuda",
-          limit=128
+          device="cuda"
       )
       print(make_table(results))
     except Exception as e:

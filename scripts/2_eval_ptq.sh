@@ -32,3 +32,13 @@ torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
 
 # --v_asym \
 # --save_qmodel_path "saved_models/qllama2-7b-4-8-8-128-a16.pt" \
+# --save_qmodel_path "saved_models/qllama2-7b-16-4-4-128-fp16.pt" \
+# --optimized_rotation_path "rotation_llama-2-7b/a16w4kv4_fp16/R.bin" \
+
+# --save_qmodel_path "saved_models/qllama3.1-8b-16-4-4-128.pt" \
+# --optimized_rotation_path "rotation_llama-3.1-8b/a16w4kv4/R.bin" \
+# --load_qmodel_path "saved_models/qllama3.1-8b-16-4-4-128.pt" \
+
+# --save_qmodel_path "saved_models/qllama2-7b-16-4-4-128-fp16.pt" \
+# --optimized_rotation_path "rotation_llama-2-7b/a16w4kv4_fp16/R.bin" \
+# --load_qmodel_path "saved_models/qllama2-7b-16-4-4-128-fp16.pt" \
