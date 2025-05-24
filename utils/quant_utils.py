@@ -79,7 +79,8 @@ class AsymSTEQuantize(torch.autograd.Function):
   def forward(ctx, x, scale, zero, maxq):
     scale = scale.to(x.device)
     zero = zero.to(x.device)
-    q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
+    # q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
+    q = torch.clamp(torch.round(x / scale) + zero, -(maxq+1)//2, (maxq-1)//2)
     return scale * (q - zero)
 
   @staticmethod
@@ -147,11 +148,11 @@ class ActQuantizer(torch.nn.Module):
       self.scale[tmp] = 1
       self.zero = torch.zeros_like(self.scale)
     else:
-      tmp = (xmin == 0) & (xmax == 0)
-      xmin[tmp] = -1
-      xmax[tmp] = +1
+      # tmp = (xmin == 0) & (xmax == 0)
+      # xmin[tmp] = -1
+      # xmax[tmp] = +1
       self.scale = (xmax - xmin) / self.maxq
-      self.zero = torch.round(-xmin / self.scale)
+      self.zero = torch.round(-xmin / self.scale).to(torch.int8) - 8
 
     self.scale = self.scale.repeat(1, 1, 1, self.groupsize).reshape(init_shape)
     self.zero = self.zero.repeat(1, 1, 1, self.groupsize).reshape(init_shape)
@@ -174,9 +175,12 @@ class ActQuantizer(torch.nn.Module):
 
     reshaped_x = x.reshape((-1, x.shape[-1]))
 
-    tmp = torch.zeros(reshaped_x.shape[0], device=dev)
-    xmin = torch.minimum(reshaped_x.min(1)[0], tmp) * self.clip_ratio
-    xmax = torch.maximum(reshaped_x.max(1)[0], tmp) * self.clip_ratio
+    # tmp = torch.zeros(reshaped_x.shape[0], device=dev)
+    # xmin = torch.minimum(reshaped_x.min(1)[0], tmp) * self.clip_ratio
+    # xmax = torch.maximum(reshaped_x.max(1)[0], tmp) * self.clip_ratio
+
+    xmax = torch.amax(reshaped_x, dim=1) * self.clip_ratio
+    xmin = torch.amin(reshaped_x, dim=1) * self.clip_ratio
     if self.sym:
       xmax = torch.maximum(torch.abs(xmin), xmax)
       tmp = xmax == 0
@@ -185,11 +189,11 @@ class ActQuantizer(torch.nn.Module):
       self.scale = self.scale.reshape(init_shape)
       self.zero = torch.zeros_like(self.scale)
     else:
-      tmp = (xmin == 0) & (xmax == 0)
-      xmin[tmp] = -1
-      xmax[tmp] = +1
+      # tmp = (xmin == 0) & (xmax == 0)
+      # xmin[tmp] = -1
+      # xmax[tmp] = +1
       self.scale = (xmax - xmin) / self.maxq
-      self.zero = torch.round(-xmin / self.scale)
+      self.zero = torch.round(-xmin / self.scale).to(torch.int8)-8
 
       self.scale = (
           self.scale.unsqueeze(1)
