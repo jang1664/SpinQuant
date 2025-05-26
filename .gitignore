@@ -14,3 +14,6 @@ llama2-7b
 
 # profile results
 prof/
+
+# pickles
+*.pkl

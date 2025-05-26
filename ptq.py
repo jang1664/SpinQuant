@@ -109,6 +109,18 @@ def train() -> None:
           device="cuda"
       )
       print(make_table(results))
+
+      if os.path.exists("./results/results.pkl"):
+        resultlist = pickle.load(open(f"./results/results.pkl", "rb"))
+      else:
+        resultlist = []
+      resultlist.append({
+          "model_args": model_args,
+          "training_args": training_args,
+          "ptq_args": ptq_args,
+          "results": results
+      })
+      pickle.dump(resultlist, open(f"./results/results.pkl", "wb"))
     except Exception as e:
       print("Error in evaluation")
       print(e)

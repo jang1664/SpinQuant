@@ -76,11 +76,13 @@ class STEQuantize(torch.autograd.Function):
 class AsymSTEQuantize(torch.autograd.Function):
   @staticmethod
   @profile("asmy_ste_quantize")
-  def forward(ctx, x, scale, zero, maxq):
+  def forward(ctx, x, scale, zero, maxq, signed):
     scale = scale.to(x.device)
     zero = zero.to(x.device)
-    # q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
-    q = torch.clamp(torch.round(x / scale) + zero, -(maxq+1)//2, (maxq-1)//2)
+    if not signed:
+      q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
+    else:
+      q = torch.clamp(torch.round(x / scale) + zero, -(maxq+1)//2, (maxq-1)//2)
     return scale * (q - zero)
 
   @staticmethod
@@ -111,7 +113,7 @@ class ActQuantizer(torch.nn.Module):
       return x
     elif self.sym:
       return STEQuantize.apply(x, self.scale, self.maxq).to(x_dtype)
-    return AsymSTEQuantize.apply(x, self.scale, self.zero, self.maxq).to(x_dtype)
+    return AsymSTEQuantize.apply(x, self.scale, self.zero, self.maxq, self.ptq_args.signed_kv).to(x_dtype)
 
   # Different from `forward`, this method returns quantized integers, scales (and zeros if asymmetric).
   def quantize(self, x):
@@ -121,13 +123,15 @@ class ActQuantizer(torch.nn.Module):
       return asym_quant(x, self.scale, self.zero, self.maxq)
 
   def configure(
-      self, bits: int, groupsize: int = -1, sym: bool = False, clip_ratio: float = 1.0
+      self, bits: int, groupsize: int = -1, sym: bool = False, clip_ratio: float = 1.0,
+      ptq_args = None
   ) -> None:
     _, self.maxq = get_minq_maxq(bits, sym)
     self.bits = bits
     self.groupsize = groupsize
     self.sym = sym
     self.clip_ratio = clip_ratio
+    self.ptq_args = ptq_args
     assert (
         self.clip_ratio <= 1 and self.clip_ratio > 0
     ), "Clip ratio should be in (0, 1]"
@@ -148,11 +152,16 @@ class ActQuantizer(torch.nn.Module):
       self.scale[tmp] = 1
       self.zero = torch.zeros_like(self.scale)
     else:
-      # tmp = (xmin == 0) & (xmax == 0)
-      # xmin[tmp] = -1
-      # xmax[tmp] = +1
+      if (not self.ptq_args.no_zp_clamp):
+        tmp = (xmin == 0) & (xmax == 0)
+        xmin[tmp] = -1
+        xmax[tmp] = +1
       self.scale = (xmax - xmin) / self.maxq
-      self.zero = torch.round(-xmin / self.scale).to(torch.int8) - 8
+      self.zero = torch.round(-xmin / self.scale)
+      if self.ptq_args.zp_int8:
+        self.zero = self.zero.to(torch.int8)
+      if self.ptq_args.signed_kv:
+        self.zero = self.zero - 8
 
     self.scale = self.scale.repeat(1, 1, 1, self.groupsize).reshape(init_shape)
     self.zero = self.zero.repeat(1, 1, 1, self.groupsize).reshape(init_shape)
@@ -175,12 +184,13 @@ class ActQuantizer(torch.nn.Module):
 
     reshaped_x = x.reshape((-1, x.shape[-1]))
 
-    # tmp = torch.zeros(reshaped_x.shape[0], device=dev)
-    # xmin = torch.minimum(reshaped_x.min(1)[0], tmp) * self.clip_ratio
-    # xmax = torch.maximum(reshaped_x.max(1)[0], tmp) * self.clip_ratio
-
-    xmax = torch.amax(reshaped_x, dim=1) * self.clip_ratio
-    xmin = torch.amin(reshaped_x, dim=1) * self.clip_ratio
+    if not self.ptq_args.no_zp_clamp:
+      tmp = torch.zeros(reshaped_x.shape[0], device=dev)
+      xmin = torch.minimum(reshaped_x.min(1)[0], tmp) * self.clip_ratio
+      xmax = torch.maximum(reshaped_x.max(1)[0], tmp) * self.clip_ratio
+    else:
+      xmax = torch.amax(reshaped_x, dim=1) * self.clip_ratio
+      xmin = torch.amin(reshaped_x, dim=1) * self.clip_ratio
     if self.sym:
       xmax = torch.maximum(torch.abs(xmin), xmax)
       tmp = xmax == 0
@@ -189,11 +199,16 @@ class ActQuantizer(torch.nn.Module):
       self.scale = self.scale.reshape(init_shape)
       self.zero = torch.zeros_like(self.scale)
     else:
-      # tmp = (xmin == 0) & (xmax == 0)
-      # xmin[tmp] = -1
-      # xmax[tmp] = +1
+      if not self.ptq_args.no_zp_clamp:
+        tmp = (xmin == 0) & (xmax == 0)
+        xmin[tmp] = -1
+        xmax[tmp] = +1
       self.scale = (xmax - xmin) / self.maxq
-      self.zero = torch.round(-xmin / self.scale).to(torch.int8)-8
+      self.zero = torch.round(-xmin / self.scale)
+      if self.ptq_args.zp_int8:
+        self.zero = self.zero.to(torch.int8)
+      if self.ptq_args.signed_kv:
+        self.zero = self.zero - 8
 
       self.scale = (
           self.scale.unsqueeze(1)

@@ -112,6 +112,7 @@ def ptq_model(args, model, model_args=None):
                     groupsize=v_groupsize,
                     sym=not (args.v_asym),
                     clip_ratio=args.v_clip_ratio,
+                    ptq_args=args,
                 )
 
             if "o_proj" in name:
@@ -130,6 +131,7 @@ def ptq_model(args, model, model_args=None):
                 groupsize=layer_groupsize,
                 sym=layer_a_sym,
                 clip_ratio=layer_a_clip,
+                ptq_args=args,
             )
 
     if args.k_bits < 16:
@@ -148,6 +150,7 @@ def ptq_model(args, model, model_args=None):
                 rotation_utils.add_qk_rotation_wrapper_after_function_call_in_forward(
                     layer.self_attn,
                     rope_function_name,
+                    args,
                     config=model.config,
                     **k_quant_config,
                 )
