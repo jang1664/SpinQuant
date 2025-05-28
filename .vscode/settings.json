@@ -1,0 +1,6 @@
+{
+  "files.associations": {
+    "*.sv": "systemverilog",
+    "numeric": "c"
+  }
+}

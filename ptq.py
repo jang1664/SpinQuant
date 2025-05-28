@@ -114,6 +114,7 @@ def train() -> None:
         resultlist = pickle.load(open(f"./results/results.pkl", "rb"))
       else:
         resultlist = []
+      del results['config']['model_args']['pretrained']
       resultlist.append({
           "model_args": model_args,
           "training_args": training_args,

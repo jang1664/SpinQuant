@@ -9,7 +9,7 @@
 # nproc_per_node indicates the number of GPUs per node to employ.
 export CUDA_VISIBLE_DEVICES=0
 torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
---input_model ./models/llama2-7b \
+--input_model $1 \
 --do_train False \
 --do_eval True \
 --per_device_eval_batch_size 4 \
@@ -17,10 +17,10 @@ torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
 --fp16 True \
 --bf16 False \
 --save_safetensors False \
---w_bits 4 \
---a_bits 16 \
---k_bits 4 \
---v_bits 4 \
+--w_bits $2 \
+--a_bits $3 \
+--k_bits $4 \
+--v_bits $4 \
 --w_clip \
 --a_asym \
 --v_asym \
