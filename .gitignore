@@ -9,7 +9,8 @@ fast-hadamard-transform/
 # model snapshots
 llama2-7b
 llama3.1-8b
-models/
+models/*
+!models/README.md
 llama2-7b
 
 # profile results
