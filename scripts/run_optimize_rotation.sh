@@ -50,7 +50,7 @@ run() {
 }
 
 # Run cases
-run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4 --v_asym
+run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4-vasym --v_asym
 
 run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4-vsym 
 # run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4_fp16 --zp_int8
