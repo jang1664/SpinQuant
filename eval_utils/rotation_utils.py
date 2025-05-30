@@ -149,10 +149,9 @@ def rotate_model(model, args):
 
 
 class QKRotationWrapper(torch.nn.Module):
-  def __init__(self, func, config, ptq_args=None, *args, **kwargs):
+  def __init__(self, func, config, *args, **kwargs):
     super().__init__()
     self.config = config
-    self.ptq_args = ptq_args
     num_heads = config.num_attention_heads
     model_dim = config.hidden_size
     head_dim = model_dim // num_heads
@@ -176,7 +175,6 @@ class QKRotationWrapper(torch.nn.Module):
           groupsize=-1,  # we put -1 to be toke-wise quantization and handle head-wise quantization by ourself
           sym=self.k_sym,
           clip_ratio=self.k_clip_ratio,
-          ptq_args=ptq_args,
       )
 
   def forward(self, *args, **kwargs):
@@ -216,7 +214,6 @@ class QKRotationWrapper(torch.nn.Module):
 def add_qk_rotation_wrapper_after_function_call_in_forward(
     module,
     function_name,
-    ptq_args,
     *args,
     **kwargs,
 ):
@@ -231,6 +228,6 @@ def add_qk_rotation_wrapper_after_function_call_in_forward(
       module,
       "forward",
       function_name,
-      functools.partial(QKRotationWrapper, ptq_args=ptq_args, *args, **kwargs),
+      functools.partial(QKRotationWrapper, *args, **kwargs),
   )
   setattr(module, attr_name, wrapper)

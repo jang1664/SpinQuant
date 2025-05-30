@@ -241,24 +241,24 @@ def parser_gen():
     parser.add_argument(
         "--layer_idx", type=int, default=10, help="Which decoder layer to capture"
     )
-    parser.add_argument(
-        "--zp_int8",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Use int8 zero-point (default: False)"
-    )
-    parser.add_argument(
-        "--signed_kv",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="signed int quantization for kv cache"
-    )
-    parser.add_argument(
-        "--no_zp_clamp",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="clamp zero-point or not"
-    )
+    # parser.add_argument(
+    #     "--zp_int8",
+    #     action=argparse.BooleanOptionalAction,
+    #     default=False,
+    #     help="Use int8 zero-point (default: False)"
+    # )
+    # parser.add_argument(
+    #     "--signed_kv",
+    #     action=argparse.BooleanOptionalAction,
+    #     default=False,
+    #     help="signed int quantization for kv cache"
+    # )
+    # parser.add_argument(
+    #     "--no_zp_clamp",
+    #     action=argparse.BooleanOptionalAction,
+    #     default=False,
+    #     help="clamp zero-point or not"
+    # )
 
     args, unknown = parser.parse_known_args()
 
