@@ -18,8 +18,8 @@ from utils import hadamard_utils
 from utils.utils import HadamardTransform
 from utils.profile import measure, profile
 import time
-from global_params import ZP_INT8, SIGNED_KV, ZP_CLAMP
-print(f"Importing quant utils. ZP_INT8: {ZP_INT8}, SIGNED_KV: {SIGNED_KV}, ZP_CLAMP: {ZP_CLAMP}")
+from global_params import ZP_INT8, SIGNED_KV, ZP_CLAMP, SCALE_NO_UPCAST
+print(f"Importing quant utils. ZP_INT8: {ZP_INT8}, SIGNED_KV: {SIGNED_KV}, ZP_CLAMP: {ZP_CLAMP}, SCALE_NO_UPCAST: {SCALE_NO_UPCAST}")
 
 def get_minq_maxq(bits, sym):
   if sym:
@@ -156,6 +156,8 @@ class ActQuantizer(torch.nn.Module):
         xmin[tmp] = -1
         xmax[tmp] = +1
       self.scale = (xmax - xmin) / self.maxq
+      if SCALE_NO_UPCAST:
+        self.scale = self.scale.to(x.dtype)
       self.zero = torch.round(-xmin / self.scale)
       if ZP_INT8:
         self.zero = self.zero.to(torch.int8)
@@ -203,6 +205,8 @@ class ActQuantizer(torch.nn.Module):
         xmin[tmp] = -1
         xmax[tmp] = +1
       self.scale = (xmax - xmin) / self.maxq
+      if SCALE_NO_UPCAST:
+        self.scale = self.scale.to(x.dtype)
       self.zero = torch.round(-xmin / self.scale)
       if ZP_INT8:
         self.zero = self.zero.to(torch.int8)
