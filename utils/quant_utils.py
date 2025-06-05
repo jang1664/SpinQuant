@@ -19,7 +19,7 @@ from utils.utils import HadamardTransform
 from utils.profile import measure, profile
 import time
 from global_params import ZP_INT8, SIGNED_KV, ZP_CLAMP
-
+print(f"Importing quant utils. ZP_INT8: {ZP_INT8}, SIGNED_KV: {SIGNED_KV}, ZP_CLAMP: {ZP_CLAMP}")
 
 def get_minq_maxq(bits, sym):
   if sym:

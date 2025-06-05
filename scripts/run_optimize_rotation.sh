@@ -5,7 +5,11 @@ run() {
     local a_bits=$3
     local k_bits=$4
     local out_name=$5
-    shift 5 # Shift the first 4 arguments
+    local zp_int8=$6
+    local signed_kv=$7
+    local zp_clamp=$8
+
+    shift 8 # Shift the first 8 arguments
     local extra_args="$@" # Capture additional arguments
 
     # Process input_model to replace / with _
@@ -17,9 +21,13 @@ run() {
         extra_args_log=$(echo "$extra_args" | sed 's/--//g' | tr ' ' '_')
     fi
 
-    export CUDA_VISIBLE_DEVICES=0
-    echo "Running optimization with the following parameters: ${input_model}, w_bits=${w_bits}, a_bits=${a_bits}, k_bits=${k_bits}, extra_args=${extra_args}"
+    echo "Running optimization with the following parameters: \
+         ${input_model}, w_bits=${w_bits}, a_bits=${a_bits}, k_bits=${k_bits}, extra_args=${extra_args}, zp_int8=${zp_int8}, signed_kv=${signed_kv}, zp_clamp=${zp_clamp}"
 
+    export CUDA_VISIBLE_DEVICES=0
+    export ZP_INT8="$zp_int8"
+    export SIGNED_KV="$signed_kv"
+    export ZP_CLAMP="$zp_clamp"
     torchrun --nnodes=1 --nproc_per_node=1 optimize_rotation.py \
     --input_model $input_model  \
     --output_rotation_path $out_name \
@@ -46,13 +54,13 @@ run() {
     --k_asym \
     --k_groupsize 128 \
     --v_groupsize 128 \
-    $extra_args > "logs/optim_rotation_${sanitized_model}_w${w_bits}_a${a_bits}_k${k_bits}_${extra_args_log}.log" 2>&1
+    $extra_args 2>&1 | tee "logs/optim_rotation_${sanitized_model}_w${w_bits}_a${a_bits}_k${k_bits}_${extra_args_log}_zpint8${zp_int8}_signedkv${signed_kv}_zpclamp${zp_clamp}.log"
 }
 
 # Run cases
-run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4-vasym --v_asym
+# run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4-vasym 0 0 1 --v_asym # default case
 
-run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4-vsym 
+run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4-vsym 0 0 1
 # run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4_fp16 --zp_int8
 # run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4_fp16 --signed_kv
 # run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4_fp16 --no_zp_clamp
