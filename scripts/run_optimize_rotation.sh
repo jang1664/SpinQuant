@@ -24,7 +24,7 @@ run() {
     echo "Running optimization with the following parameters: \
          ${input_model}, w_bits=${w_bits}, a_bits=${a_bits}, k_bits=${k_bits}, extra_args=${extra_args}, zp_int8=${zp_int8}, signed_kv=${signed_kv}, zp_clamp=${zp_clamp}"
 
-    export CUDA_VISIBLE_DEVICES=0
+    export CUDA_VISIBLE_DEVICES=1
     export ZP_INT8="$zp_int8"
     export SIGNED_KV="$signed_kv"
     export ZP_CLAMP="$zp_clamp"
@@ -34,8 +34,8 @@ run() {
     --output_dir "./outputs/" \
     --logging_dir "./logs/" \
     --model_max_length 2048 \
-    --fp16 True \
-    --bf16 False \
+    --fp16 False \
+    --bf16 True \
     --log_on_each_node False \
     --per_device_train_batch_size 1 \
     --logging_steps 1 \
@@ -59,8 +59,10 @@ run() {
 
 # Run cases
 # run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4-vasym 0 0 1 --v_asym # default case
+run ./models/llama3.1-8b 4 16 4 rotation_llama-3.1-8b/a16w4kv4-vasym 0 0 1 --v_asym # default case
+run ./models/llama3.2-3b 4 16 4 rotation_llama-3.2-3b/a16w4kv4-vasym 0 0 1 --v_asym # default case
 
-run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4-vsym 0 0 1
+# run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4-vsym 0 0 1
 # run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4_fp16 --zp_int8
 # run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4_fp16 --signed_kv
 # run ./models/llama2-7b 4 16 4 rotation_llama-2-7b/a16w4kv4_fp16 --no_zp_clamp

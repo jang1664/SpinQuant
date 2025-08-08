@@ -2,5 +2,8 @@
   "files.associations": {
     "*.sv": "systemverilog",
     "numeric": "c"
-  }
+  },
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}",
+  ],
 }

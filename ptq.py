@@ -27,6 +27,8 @@ from functools import partial
 import pickle
 import os
 
+torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+
 task_names = ['hellaswag', 'arc_easy','arc_challenge', 'winogrande', 'openbookqa', "wikitext"]
 # task_names = ['openbookqa']
 # task_names = ['arc_easy']
