@@ -47,7 +47,10 @@ class Profiler:
     if not profiler.enabled:
       yield
       return
-
+    
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        
     start_time = time.time()
     parent = profiler.stack[-1] if profiler.stack else None
     profiler.stack.append(tag)
@@ -55,6 +58,8 @@ class Profiler:
     try:
       yield
     finally:
+      if torch.cuda.is_available():
+        torch.cuda.synchronize()
       elapsed = time.time() - start_time
       hierarchical_tag = ".".join(profiler.stack)
       profiler.stack.pop()
