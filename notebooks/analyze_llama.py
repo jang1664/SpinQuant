@@ -69,6 +69,10 @@ from utils.profile import (
 )
 import pstats
 import importlib
+import importlib.util
+use_flash_attn2 = importlib.util.find_spec("flash_attn") is not None
+
+attn_impl = "flash_attention_2" if use_flash_attn2 else "sdpa"
 
 import pandas as pd
 pd.set_option('display.max_colwidth', 100)
@@ -96,7 +100,7 @@ print(ptq_args)
 print("------- ARGS END ----------")
 
 config = transformers.AutoConfig.from_pretrained(
-    model_args.input_model, token=model_args.access_token, attn_implementation="eager"
+    model_args.input_model, token=model_args.access_token, attn_implementation="sdpa"
 )
 # Llama v3.2 specific: Spinquant is not compatiable with tie_word_embeddings, clone lm_head from embed_tokens
 process_word_embeddings = False
@@ -136,21 +140,6 @@ target_seq_len = 32
 batch_size = 2
 
 os.makedirs("./prof", exist_ok=True)
-
-batch_size = [1, 2, 4]
-past_seq_len = [8, 16, 32, 64, 128]
-seq_len = [8, 16, 32, 64, 128]
-
-# for bs in batch_size:
-#   # prefill
-#   for sl in seq_len:
-#     print(f"PREFILL: bs {bs}, sl {sl}")
-#     run_profile(model, bs, 0, sl, "cpu", f"./prof/bs{bs}_sl{sl}_prf.png") 
-
-#   # generate
-#   for sl in past_seq_len:
-#     print(f"GENERATE: bs {bs}, sl {sl}")
-#     run_profile(model, bs, sl, 1, "cpu", f"./prof/bs{bs}_sl{sl}_gen.png")
 
 batch_size = [1, 2, 4]
 past_seq_len = [8, 16, 32, 64, 128]

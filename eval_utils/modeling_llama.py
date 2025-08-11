@@ -612,9 +612,12 @@ class LlamaFlashAttention2(LlamaAttention):
 
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        with measure("qproj"):
+            query_states = self.q_proj(hidden_states)
+        with measure("kproj"):
+            key_states = self.k_proj(hidden_states)
+        with measure("vproj"):
+            value_states = self.v_proj(hidden_states)
 
         # Flash attention requires the input to have the shape
         # batch_size x seq_length x head_dim x hidden_dim
@@ -639,9 +642,10 @@ class LlamaFlashAttention2(LlamaAttention):
             cos, sin = self.rotary_emb(value_states, position_ids)
         else:
             cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin
-        )
+        with measure("apply_rope"):
+            query_states, key_states = apply_rotary_pos_emb(
+                query_states, key_states, cos, sin
+            )
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -684,21 +688,23 @@ class LlamaFlashAttention2(LlamaAttention):
             key_states = key_states.to(target_dtype)
             value_states = value_states.to(target_dtype)
 
-        attn_output = _flash_attention_forward(
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            q_len,
-            position_ids=position_ids,
-            dropout=dropout_rate,
-            sliding_window=getattr(self, "sliding_window", None),
-            use_top_left_mask=self._flash_attn_uses_top_left_mask,
-            is_causal=self.is_causal,
-        )
+        with measure("flash_attn_forward"):
+            attn_output = _flash_attention_forward(
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                q_len,
+                position_ids=position_ids,
+                dropout=dropout_rate,
+                sliding_window=getattr(self, "sliding_window", None),
+                use_top_left_mask=self._flash_attn_uses_top_left_mask,
+                is_causal=self.is_causal,
+            )
 
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
+        with measure("oproj"):
+            attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None

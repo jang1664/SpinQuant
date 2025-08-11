@@ -49,6 +49,7 @@ class Profiler:
       return
     
     if torch.cuda.is_available():
+        torch.cuda.nvtx.range_push(tag)
         torch.cuda.synchronize()
         
     start_time = time.time()
@@ -60,6 +61,7 @@ class Profiler:
     finally:
       if torch.cuda.is_available():
         torch.cuda.synchronize()
+        torch.cuda.nvtx.range_pop()
       elapsed = time.time() - start_time
       hierarchical_tag = ".".join(profiler.stack)
       profiler.stack.pop()
@@ -143,6 +145,8 @@ profile_desc = [
   ("rope", r"apply_rope$", "LeafTime"),
   ("attn_weights_cal", r"attn_weights_cal$", "TotalTime"),
   ("softmax", r"softmax$", "TotalTime"),
+  ("flash_attn", r"flash_attn_forward$", "TotalTime"),
+  ("scaled_dot_product_attention", r"sdpa$", "TotalTime"),
   ("attn_output", r"attn_output$", "TotalTime"),
   ("actfn", r"actfn$", "TotalTime"),
   ("quant_param_find", r"find_params", "TotalTime"),
@@ -155,6 +159,44 @@ profile_desc = [
   ("reshape", [r"head_reshape$", r"repeat$"], "TotalTime"),
   ("output_reshape", [r"output_reshape$"], "TotalTime"),
 ]
+
+# profile_desc = [
+#   # Linear : q/k/v/o proj + up/down/gateproj + lm_head/linear
+#   ("linear", [
+#       r"(?:^|\.)(q|k|v|o)proj(?:\.|$)",
+#       r"(?:^|\.)(up|down|gate)proj(?:\.|$)",
+#       r"(?:^|\.)(lm_head|linear)(?:\.|$)"
+#   ], "TotalTime"),
+
+#   # RoPE: apply_rope / rope_param_cal / qrotate/krotate(=qroate ?)
+#   ("rope", [
+#       r"(?:^|\.)(apply_rope|rope_param_cal)(?:\.|$)",
+#       r"(?:^|\.)(qrotate|krotate|qroate)(?:\.|$)"
+#   ], "LeafTime"),
+
+#   # Attention core: (sdpa/flash_attn2/flash_attn) 혹은 eager의 attn_weights_cal+softmax
+#   ("attn_core", [
+#       r"(?:^|\.)(scaled_dot_product_attention|sdpa|flash_attn_forward|flash_attn)(?:\.|$)",
+#       r"(?:^|\.)(attn_weights_cal|softmax)(?:\.|$)"
+#   ], "TotalTime"),
+
+#   ("reshape", [
+#       r"(?:^|\.)(head_reshape|output_reshape|attn_output_reshape|repeat)(?:\.|$)"
+#   ], "TotalTime"),
+
+#   ("rmsnorm", r"(?:^|\.)(rmsnorm)(?:\.|$)", "TotalTime"),
+#   ("actfn",   r"(?:^|\.)(actfn)(?:\.|$)",   "TotalTime"),
+
+#   ("quant_param_find", r"(?:^|\.)(find_params)(?:\.|$)", "TotalTime"),
+#   ("quant", [
+#       r"(?:^|\.)(asmy_ste_quantize)(?:\.|$)",
+#       r"(?:^|\.)(k_head_quantize)(?:\.|$)"
+#   ], "TotalTime"),
+
+#   ("embed",  r"(?:^|\.)(embed_tokens)(?:\.|$)", "TotalTime"),
+#   ("mlpmul", r"(?:^|\.)(mlpmul)(?:\.|$)",       "TotalTime"),
+# ]
+
 
 def get_profiled_df(df):
   profile_data = {
@@ -181,12 +223,16 @@ def get_profiled_df(df):
   return profile_df
 
 def plot_profiled_df(df, fname=""):
+  df = df[df["time"] > 0] # Filter out zero time entries
+  if df.empty:
+      print("Nothing to plot."); return
   ax = df.plot.barh(x='name', y='time', legend=False)
   ax.set_xscale('log')
   ax.set_xlabel("time (log scale)")
 
   xmax = df['time'].max()
-  ax.set_xlim(left=df['time'].min() * 0.9, right=xmax * 1.2)
+  left = max(df['time'].min() * 0.9, 1e-9)
+  ax.set_xlim(left=left, right=xmax * 1.2)
 
   # 3) Annotate each bar
   for bar in ax.patches:
