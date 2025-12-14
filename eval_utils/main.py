@@ -24,7 +24,8 @@ def ptq_model(args, model, model_args=None):
     # Rotate the weights
     if args.rotate:
         fuse_norm_utils.fuse_layer_norms(model)
-        rotation_utils.rotate_model(model, args)
+        if not args.load_qmodel_path:
+            rotation_utils.rotate_model(model, args)
         utils.cleanup_memory(verbos=True)
 
         quant_utils.add_actquant(model)  # Add Activation Wrapper to the model
