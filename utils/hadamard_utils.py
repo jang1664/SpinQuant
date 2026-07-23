@@ -14,6 +14,22 @@ from utils.utils import HadamardTransform
 from utils.profile import measure, profile
 
 
+ONLINE_HAD_MODE_FACTORIZED = "factorized"
+ONLINE_HAD_MODE_ZERO_PADDING = "zero_padding"
+ONLINE_HAD_MODES = (
+    ONLINE_HAD_MODE_FACTORIZED,
+    ONLINE_HAD_MODE_ZERO_PADDING,
+)
+
+
+def validate_online_had_mode(mode):
+    if mode not in ONLINE_HAD_MODES:
+        raise ValueError(
+            f"Unsupported online Hadamard mode {mode!r}; "
+            f"expected one of {ONLINE_HAD_MODES}"
+        )
+
+
 def get_hadK(n, transpose=False):
     hadK, K = None, None
     if n % 172 == 0:  # llama-2-7b up
@@ -112,6 +128,21 @@ def matmul_hadUt(X):
     return matmul_hadU(X, transpose=True)
 
 
+def matmul_hadU_dispatch(X, mode=ONLINE_HAD_MODE_FACTORIZED):
+    validate_online_had_mode(mode)
+    if mode == ONLINE_HAD_MODE_ZERO_PADDING:
+        if not X.is_cuda:
+            raise RuntimeError(
+                "zero_padding online Hadamard requires a CUDA tensor "
+                "and fast-hadamard-transform"
+            )
+        n = X.shape[-1]
+        return HadamardTransform.apply(X.contiguous()) / torch.tensor(
+            n, device=X.device, dtype=torch.float32
+        ).sqrt()
+    return matmul_hadU(X)
+
+
 def random_hadamard_matrix(size, device):
     # See https://cornell-relaxml.github.io/quip-sharp/ , Section "Randomized Hadamard Transformation"
     Q = torch.randint(low=0, high=2, size=(size,)).to(torch.float64)
@@ -127,14 +158,37 @@ def hadamard_matrix(size, device):
 
 
 @profile("matmul_hadU_cuda")
-def matmul_hadU_cuda(X, hadK, K):
+def matmul_hadU_cuda(
+    X,
+    hadK=None,
+    K=None,
+    mode=ONLINE_HAD_MODE_FACTORIZED,
+):
+    validate_online_had_mode(mode)
     n = X.shape[-1]
+
+    if mode == ONLINE_HAD_MODE_ZERO_PADDING:
+        if not X.is_cuda:
+            raise RuntimeError(
+                "zero_padding online Hadamard requires a CUDA tensor "
+                "and fast-hadamard-transform"
+            )
+        return HadamardTransform.apply(X.contiguous()) / torch.tensor(
+            n, device=X.device, dtype=torch.float32
+        ).sqrt()
+
+    if K is None:
+        hadK, K = get_hadK(n)
     if K == 1:
-        return HadamardTransform.apply(X.contiguous()) / torch.tensor(n).sqrt()
+        return HadamardTransform.apply(X.contiguous()) / torch.tensor(
+            n, device=X.device, dtype=torch.float32
+        ).sqrt()
     # if transpose:
     #     hadK = hadK.T.contiguous()
     input = X.view(-1, K, n // K)
-    input = HadamardTransform.apply(input.contiguous()) / torch.tensor(n).sqrt()
+    input = HadamardTransform.apply(input.contiguous()) / torch.tensor(
+        n, device=X.device, dtype=torch.float32
+    ).sqrt()
     input = hadK.to(input.device).to(input.dtype) @ input
     return input.reshape(X.shape)
 

@@ -75,6 +75,16 @@ def parser_gen():
         default=False,
         help="Apply Hadamard rotation in FP32 (default: False)",
     )
+    parser.add_argument(
+        "--online_had_mode",
+        type=str,
+        default="factorized",
+        choices=["factorized", "zero_padding"],
+        help=(
+            "Online R4 Hadamard implementation for down_proj: "
+            "factorized (default) or fast-kernel implicit zero padding"
+        ),
+    )
 
     # Activation Quantization Arguments
     parser.add_argument(
