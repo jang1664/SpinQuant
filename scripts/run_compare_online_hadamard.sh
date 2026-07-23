@@ -7,6 +7,7 @@ SPINQUANT_DIR=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 cd "${SPINQUANT_DIR}"
 
 CUDA_DEVICE=${CUDA_DEVICE:-0}
+SPINQUANT_PYTHON=${SPINQUANT_PYTHON:-python}
 read -r -a HAD_MODES <<< "${ONLINE_HAD_MODES:-factorized zero_padding}"
 
 MODELS=(
@@ -33,7 +34,7 @@ print_command() {
 
 if [[ ${DRY_RUN:-0} != 1 ]]; then
     export CUDA_VISIBLE_DEVICES="${CUDA_DEVICE}"
-    /home/jaeyongjang/.conda/envs/spinquant/bin/python - <<'PY'
+    "${SPINQUANT_PYTHON}" - <<'PY'
 from importlib.metadata import version
 
 from packaging.version import Version
@@ -78,7 +79,9 @@ for mode in "${HAD_MODES[@]}"; do
         fi
 
         command=(
-            torchrun
+            "${SPINQUANT_PYTHON}"
+            -m
+            torch.distributed.run
             "${TORCHRUN_RDZV_ARGS[@]}"
             --nnodes=1
             --nproc_per_node=1

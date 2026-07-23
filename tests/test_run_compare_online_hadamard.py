@@ -10,6 +10,7 @@ def test_dry_run_isolates_modes_and_passes_cli_option():
     env = os.environ.copy()
     env["DRY_RUN"] = "1"
     env["ONLINE_HAD_MODES"] = "factorized zero_padding"
+    env["SPINQUANT_PYTHON"] = "/test/spinquant/python"
     result = subprocess.run(
         ["bash", "scripts/run_compare_online_hadamard.sh"],
         cwd=SPINQUANT_DIR,
@@ -19,6 +20,7 @@ def test_dry_run_isolates_modes_and_passes_cli_option():
         check=True,
     )
     output = result.stdout
+    assert "/test/spinquant/python -m torch.distributed.run" in output
     assert "--online_had_mode factorized" in output
     assert "--online_had_mode zero_padding" in output
     assert "online-had-comparison/factorized/llama2-7b.json" in output
