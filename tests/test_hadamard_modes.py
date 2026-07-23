@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from utils import hadamard_utils
+from utils import quant_utils
 from utils.process_args import parser_gen
 
 
@@ -94,3 +95,36 @@ def test_non_power_of_two_modes_are_distinct():
         x, mode="zero_padding"
     )
     assert not torch.allclose(zero_padding, factorized)
+
+
+def test_act_quant_wrapper_defaults_to_factorized():
+    wrapper = quant_utils.ActQuantWrapper(torch.nn.Linear(12, 4))
+    assert wrapper.online_had_mode == "factorized"
+
+
+@pytest.mark.skipif(not CUDA_READY, reason="CUDA is required")
+def test_weight_and_activation_use_zero_padding():
+    torch.manual_seed(0)
+    linear = torch.nn.Linear(12, 4, bias=False).cuda().float()
+    wrapper = quant_utils.ActQuantWrapper(linear)
+    wrapper.online_full_had = True
+    wrapper.online_had_mode = "zero_padding"
+    wrapper.had_K, wrapper.K = hadamard_utils.get_hadK(12)
+
+    x = torch.randn(2, 12, device="cuda")
+    expected_x = hadamard_utils.matmul_hadU_cuda(
+        x, mode="zero_padding"
+    )
+    expected_output = linear(expected_x)
+    actual_output = wrapper(x)
+    torch.testing.assert_close(actual_output, expected_output)
+
+    original_weight = linear.weight.detach().clone()
+    expected_weight = hadamard_utils.matmul_hadU_cuda(
+        original_weight, mode="zero_padding"
+    )
+    linear.weight.data.copy_(original_weight)
+    hadamard_utils.apply_exact_had_to_linear(
+        linear, online_had_mode="zero_padding"
+    )
+    torch.testing.assert_close(linear.weight, expected_weight)

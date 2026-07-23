@@ -247,6 +247,7 @@ class ActQuantWrapper(torch.nn.Module):
     self.K = 1
     self.online_full_had = False
     self.online_partial_had = False
+    self.online_had_mode = hadamard_utils.ONLINE_HAD_MODE_FACTORIZED
     self.had_dim = 0
     self.fp32_had = False
 
@@ -275,11 +276,19 @@ class ActQuantWrapper(torch.nn.Module):
     # Rotate, if needed
     if self.online_full_had:
       if self.fp32_had:  # Full Hadamard in FP32
-        x = hadamard_utils.matmul_hadU_cuda(x.float(), self.had_K, self.K).to(
-            x_dtype
-        )
+        x = hadamard_utils.matmul_hadU_cuda(
+            x.float(),
+            self.had_K,
+            self.K,
+            mode=self.online_had_mode,
+        ).to(x_dtype)
       else:  # Full Hadamard in FP16
-        x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
+        x = hadamard_utils.matmul_hadU_cuda(
+            x,
+            self.had_K,
+            self.K,
+            mode=self.online_had_mode,
+        )
 
     elif self.online_partial_had:
       # todo: implement this in QAttention to avoid reshaping!

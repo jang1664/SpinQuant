@@ -198,8 +198,15 @@ def matmul_hadUt_cuda(X, hadK, K):
 
 
 @profile("apply_exact_had_to_linear")
-def apply_exact_had_to_linear(module, had_dim=-1, output=False, R2=None):
+def apply_exact_had_to_linear(
+    module,
+    had_dim=-1,
+    output=False,
+    R2=None,
+    online_had_mode=ONLINE_HAD_MODE_FACTORIZED,
+):
     assert isinstance(module, torch.nn.Linear)
+    validate_online_had_mode(online_had_mode)
     in_features, out_features = module.in_features, module.out_features
 
     if had_dim != -1:
@@ -212,12 +219,24 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False, R2=None):
     W_ = W_.float().cuda()
 
     if had_dim == -1:
+        had_K, K = None, None
+        if online_had_mode == ONLINE_HAD_MODE_FACTORIZED:
+            dimension = out_features if output else in_features
+            had_K, K = get_hadK(dimension)
         if output:
-            had_K, K = get_hadK(out_features)
-            W_ = matmul_hadU_cuda(W_.t(), had_K, K).t()
+            W_ = matmul_hadU_cuda(
+                W_.t(),
+                had_K,
+                K,
+                mode=online_had_mode,
+            ).t()
         if not output:
-            had_K, K = get_hadK(in_features)
-            W_ = matmul_hadU_cuda(W_, had_K, K)
+            W_ = matmul_hadU_cuda(
+                W_,
+                had_K,
+                K,
+                mode=online_had_mode,
+            )
     else:
         hadK = hadamard_matrix(had_dim, "cuda").to(torch.float64)
         if R2 is not None:

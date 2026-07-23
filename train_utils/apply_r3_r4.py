@@ -21,11 +21,14 @@ from utils.hadamard_utils import (
 from utils.utils import HadamardTransform
 
 
-def R4_rotate_down_proj_weights(layer):
+def R4_rotate_down_proj_weights(layer, online_had_mode):
     # Rotate the MLP output weights and bias.
     W = layer.mlp.down_proj
     apply_exact_had_to_linear(
-        W, had_dim=-1, output=False
+        W,
+        had_dim=-1,
+        output=False,
+        online_had_mode=online_had_mode,
     )  # apply exact (inverse) hadamard on the weights of mlp output
 
 
@@ -41,7 +44,7 @@ def rotate_model(model, args):
     for idx, layer in enumerate(
         tqdm.tqdm(layers, unit="layer", desc="Applying R4 rotation to W_down")
     ):
-        R4_rotate_down_proj_weights(layers[idx])
+        R4_rotate_down_proj_weights(layers[idx], args.online_had_mode)
 
 
 class QKRotationWrapper(torch.nn.Module):

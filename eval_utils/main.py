@@ -32,10 +32,17 @@ def ptq_model(args, model, model_args=None):
         qlayers = quant_utils.find_qlayers(model)
         for name in qlayers:
             if "down_proj" in name:
-                had_K, K = hadamard_utils.get_hadK(model.config.intermediate_size)
                 qlayers[name].online_full_had = True
-                qlayers[name].had_K = had_K
-                qlayers[name].K = K
+                qlayers[name].online_had_mode = args.online_had_mode
+                if (
+                    args.online_had_mode
+                    == hadamard_utils.ONLINE_HAD_MODE_FACTORIZED
+                ):
+                    had_K, K = hadamard_utils.get_hadK(
+                        model.config.intermediate_size
+                    )
+                    qlayers[name].had_K = had_K
+                    qlayers[name].K = K
                 qlayers[name].fp32_had = args.fp32_had
     else:
         quant_utils.add_actquant(
