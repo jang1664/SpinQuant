@@ -59,6 +59,32 @@ Step 2: Run PTQ evaluation with optimized rotation
 After obtaining the optimized_rotation, put the rotation matrix into optimized_rotation_path for evaluation.
 * `bash scripts/2_eval_ptq.sh $model_name $w_bit $a_bit $kv_bit`
 
+### Compare online Hadamard implementations
+
+The R4 transform used by `down_proj` defaults to the original factorized
+implementation. Select the fast-kernel implicit zero-padding implementation
+with `--online_had_mode zero_padding`.
+
+Run the W4A8KV4 comparison for Llama-2 7B, Llama-3.1 8B, and Llama-3.2 3B:
+
+```bash
+bash scripts/run_compare_online_hadamard.sh
+```
+
+Resume only zero-padding runs with:
+
+```bash
+ONLINE_HAD_MODES=zero_padding bash scripts/run_compare_online_hadamard.sh
+```
+
+Summarize completed JSON results with:
+
+```bash
+python summarize_hadamard_comparison.py \
+  --factorized-dir results/online-had-comparison/factorized \
+  --zero-padding-dir results/online-had-comparison/zero_padding
+```
+
 ### 3. Export to ExecuTorch
 We also support exporting the quantized model to ExecuTorch, which allows us to utilize the quantization kernels and achieve real-time speedup. For more information on kernel implementation details, please see [ExecuTorch](https://pytorch.org/executorch/stable/index.html), and [ExecuTorch with SpinQuant](https://github.com/pytorch/executorch/tree/main/examples/models/llama#spinquant). We currently support 4-bit weight (set group-size to 256 for 8B model and to 32 for smaller model) and 8-bit dynamic activation quantization.
 
@@ -137,4 +163,3 @@ LLM-QAT: Data-Free Quantization Aware Training for Large Language Models [[Paper
 ## License
 
 BiT is CC-BY-NC 4.0 licensed as of now.
-
