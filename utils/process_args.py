@@ -303,6 +303,24 @@ def parser_gen():
         default=None,
         help="Save lm-eval accuracy and perplexity metrics as JSON",
     )
+    parser.add_argument(
+        "--eval_tasks",
+        type=str,
+        default="hellaswag,arc_easy,arc_challenge,winogrande,openbookqa,wikitext",
+        help="Comma-separated lm-eval task names",
+    )
+    parser.add_argument(
+        "--eval_limit",
+        type=int,
+        default=None,
+        help="Optional maximum number of examples per lm-eval subtask",
+    )
+    parser.add_argument(
+        "--lm_eval_batch_size",
+        type=str,
+        default="auto",
+        help="lm-eval batch size (use 1 for stable generation on eager attention)",
+    )
 
     # Experiments Arguments
     parser.add_argument(

@@ -31,10 +31,6 @@ import os
 
 torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 
-task_names = ['hellaswag', 'arc_easy','arc_challenge', 'winogrande', 'openbookqa', "wikitext"]
-# task_names = ['openbookqa']
-# task_names = ['arc_easy']
-
 CUDA_DEVICES = list(map(str.strip, os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")))
 FIRST_GPU_ID = int(CUDA_DEVICES[0])
 print(FIRST_GPU_ID)
@@ -51,7 +47,7 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def quantization_metadata(model_args, ptq_args, model):
+def quantization_metadata(model_args, training_args, ptq_args, model, task_names):
     rotation_source = ptq_args.optimized_rotation_path
     return {
         "model": model_args.input_model,
@@ -74,6 +70,11 @@ def quantization_metadata(model_args, ptq_args, model):
         "rotate": ptq_args.rotate,
         "rotation_checkpoint": rotation_source,
         "rotation_checkpoint_sha256": file_sha256(rotation_source),
+        "eval_tasks": task_names,
+        "num_fewshot": 0,
+        "model_max_length": training_args.model_max_length,
+        "eval_limit": ptq_args.eval_limit,
+        "lm_eval_batch_size": ptq_args.lm_eval_batch_size,
     }
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = str(FIRST_GPU_ID)
@@ -82,6 +83,9 @@ def quantization_metadata(model_args, ptq_args, model):
 def train() -> None:
     dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=8))
     model_args, training_args, ptq_args = process_args_ptq()
+    task_names = [task.strip() for task in ptq_args.eval_tasks.split(",") if task.strip()]
+    if not task_names:
+        raise ValueError("--eval_tasks must contain at least one task")
     print("------- ARGS ----------")
     print("-----model args-----")
     print(model_args)
@@ -152,18 +156,23 @@ def train() -> None:
                       "max_length": training_args.model_max_length},
           tasks=task_names,
           num_fewshot=0,
-          batch_size="auto",
+          limit=ptq_args.eval_limit,
+          batch_size=ptq_args.lm_eval_batch_size,
           device="cuda"
       )
       print(make_table(results))
       results["spinquant_quantization"] = quantization_metadata(
-          model_args, ptq_args, model
+        model_args, training_args, ptq_args, model, task_names
       )
 
       os.makedirs("./results", exist_ok=True)
       if os.path.exists("./results/results.pkl"):
-        with open("./results/results.pkl", "rb") as results_file:
-          resultlist = pickle.load(results_file)
+        try:
+          with open("./results/results.pkl", "rb") as results_file:
+            resultlist = pickle.load(results_file)
+        except (EOFError, pickle.UnpicklingError, AttributeError, TypeError):
+          log.warning("Ignoring unreadable legacy results.pkl")
+          resultlist = []
       else:
         resultlist = []
       del results['config']['model_args']['pretrained']
@@ -181,8 +190,13 @@ def train() -> None:
           "ptq_args": ptq_args,
           "results": results
       })
-      with open("./results/results.pkl", "wb") as results_file:
-        pickle.dump(resultlist, results_file)
+      try:
+        with open("./results/results.pkl", "wb") as results_file:
+          pickle.dump(resultlist, results_file)
+      except (pickle.PicklingError, TypeError, AttributeError) as pickle_error:
+        # lm-eval may include dynamically defined filter classes that cannot be
+        # serialized. The JSON result requested by the caller is authoritative.
+        log.warning("Skipping legacy results.pkl persistence: %s", pickle_error)
     except Exception as e:
       print("Error in evaluation")
       print(e)

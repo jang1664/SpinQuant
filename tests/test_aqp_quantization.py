@@ -29,6 +29,23 @@ def test_aqp_argument_defaults_and_q_groupsize_fallback(monkeypatch):
     assert args.attention_backend == "auto"
 
 
+def test_eval_tasks_are_configurable(monkeypatch):
+    args = parse_spinquant_args(
+        monkeypatch, "--eval_tasks", "mmlu,gsm8k_cot, bbh_cot_zeroshot,gpqa_diamond"
+    )
+    assert args.eval_tasks == "mmlu,gsm8k_cot, bbh_cot_zeroshot,gpqa_diamond"
+
+
+def test_eval_limit_is_configurable(monkeypatch):
+    args = parse_spinquant_args(monkeypatch, "--eval_limit", "3")
+    assert args.eval_limit == 3
+
+
+def test_lm_eval_batch_size_is_configurable(monkeypatch):
+    args = parse_spinquant_args(monkeypatch, "--lm_eval_batch_size", "1")
+    assert args.lm_eval_batch_size == "1"
+
+
 def test_quantizer_repr_exposes_configured_bit_width():
     quantizer = ActQuantizer()
     quantizer.configure(bits=8, groupsize=-1, sym=False, clip_ratio=1.0)
