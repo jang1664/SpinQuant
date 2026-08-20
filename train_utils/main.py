@@ -14,6 +14,25 @@ from train_utils import apply_r3_r4, rtn_utils
 from utils import fuse_norm_utils, hadamard_utils, quant_utils, utils
 
 
+def add_probability_quantization(model, args):
+    if args.p_bits == 16:
+        return
+    attention_backend = getattr(model.config, "_attn_implementation", "eager")
+    if attention_backend != "eager":
+        raise ValueError(
+            f"P quantization requires eager attention, got {attention_backend!r}"
+        )
+    for layer in model.model.layers:
+        quantizer = quant_utils.ActQuantizer()
+        quantizer.configure(
+            bits=args.p_bits,
+            groupsize=args.p_groupsize,
+            sym=not args.p_asym,
+            clip_ratio=args.p_clip_ratio,
+        )
+        layer.self_attn.p_quantizer = quantizer
+
+
 def prepare_model(args, model):
     transformers.set_seed(args.seed)
     model.eval()
@@ -89,13 +108,17 @@ def prepare_model(args, model):
                 clip_ratio=layer_a_clip,
             )
 
-    if args.k_bits < 16:
+    if args.q_bits < 16 or args.k_bits < 16:
         if args.k_pre_rope:
             raise NotImplementedError("Pre-RoPE quantization is not supported yet!")
         else:
             rope_function_name = "apply_rotary_pos_emb"
             layers = model.model.layers
-            k_quant_config = {
+            qk_quant_config = {
+                "q_bits": args.q_bits,
+                "q_groupsize": args.q_groupsize,
+                "q_sym": not (args.q_asym),
+                "q_clip_ratio": args.q_clip_ratio,
                 "k_bits": args.k_bits,
                 "k_groupsize": args.k_groupsize,
                 "k_sym": not (args.k_asym),
@@ -106,7 +129,9 @@ def prepare_model(args, model):
                     layer.self_attn,
                     rope_function_name,
                     config=model.config,
-                    **k_quant_config,
+                    **qk_quant_config,
                 )
+
+    add_probability_quantization(model, args)
 
     return model

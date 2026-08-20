@@ -221,6 +221,63 @@ def parser_gen():
         help="Clip ratio for k-cache quantization. new_max = max * clip_ratio",
     )
 
+    # Attention BMM Quantization Arguments
+    parser.add_argument(
+        "--q_bits",
+        type=int,
+        default=16,
+        help="Number of bits for Q immediately before the QK^T matmul (16 bypasses quantization)",
+    )
+    parser.add_argument(
+        "--q_groupsize",
+        type=int,
+        default=None,
+        help="Q groupsize; defaults to k_groupsize. Supported values are -1 and head_dim",
+    )
+    parser.add_argument(
+        "--q_asym",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Asymmetric Q quantization (default: False)",
+    )
+    parser.add_argument(
+        "--q_clip_ratio",
+        type=float,
+        default=1.0,
+        help="Clip ratio for Q quantization. new_max = max * clip_ratio",
+    )
+    parser.add_argument(
+        "--p_bits",
+        type=int,
+        default=16,
+        help="Number of bits for softmax probabilities before the PV matmul (16 bypasses quantization)",
+    )
+    parser.add_argument(
+        "--p_groupsize",
+        type=int,
+        default=-1,
+        help="P groupsize. Only per-probability-row quantization (-1) is supported",
+    )
+    parser.add_argument(
+        "--p_asym",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Asymmetric P quantization (default: True)",
+    )
+    parser.add_argument(
+        "--p_clip_ratio",
+        type=float,
+        default=1.0,
+        help="Clip ratio for P quantization. new_max = max * clip_ratio",
+    )
+    parser.add_argument(
+        "--attention_backend",
+        type=str,
+        default="auto",
+        choices=["auto", "eager", "sdpa", "flash_attention_2"],
+        help="Attention implementation. P quantization requires eager; use eager for both A/Q/P comparison conditions",
+    )
+
     # Save/Load Quantized Model Arguments
     parser.add_argument(
         "--load_qmodel_path",
@@ -239,6 +296,12 @@ def parser_gen():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Export the quantized model to executorch and save in save_qmodel_path",
+    )
+    parser.add_argument(
+        "--results_path",
+        type=str,
+        default=None,
+        help="Save lm-eval accuracy and perplexity metrics as JSON",
     )
 
     # Experiments Arguments
@@ -271,6 +334,16 @@ def parser_gen():
     # )
 
     args, unknown = parser.parse_known_args()
+
+    if args.q_groupsize is None:
+        args.q_groupsize = args.k_groupsize
+    if args.p_groupsize != -1:
+        parser.error("--p_groupsize currently supports only -1 (one probability row per group)")
+    if args.p_bits < 16 and args.attention_backend not in ("auto", "eager"):
+        parser.error("--p_bits below 16 requires --attention_backend eager (or auto, which forces eager)")
+    for name in ("a_bits", "w_bits", "v_bits", "k_bits", "q_bits", "p_bits"):
+        if getattr(args, name) < 1 or getattr(args, name) > 16:
+            parser.error(f"--{name} must be between 1 and 16")
 
     # assert (
     #     args.a_groupsize == args.w_groupsize

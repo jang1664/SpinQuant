@@ -409,6 +409,8 @@ class LlamaAttention(nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
         self.is_causal = True
+        # Configured by eval_utils.main when P quantization is requested.
+        self.p_quantizer = None
 
         self.q_proj = nn.Linear(
             self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias
@@ -536,6 +538,15 @@ class LlamaAttention(nn.Module):
         attn_weights = nn.functional.dropout(
             attn_weights, p=self.attention_dropout, training=self.training
         )
+        if self.p_quantizer is not None:
+          with measure("p_quantize"):
+            original_shape = attn_weights.shape
+            probability_rows = attn_weights.reshape(-1, original_shape[-1])
+            self.p_quantizer.find_params(probability_rows)
+            attn_weights = self.p_quantizer(probability_rows).reshape(
+                original_shape
+            )
+            self.p_quantizer.free()
 
         with measure("attn_output"):
           attn_output = torch.matmul(attn_weights, value_states)

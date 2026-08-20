@@ -47,8 +47,13 @@ def train() -> None:
     log.info("the rank is {}".format(local_rank))
     torch.distributed.barrier()
 
+    config_kwargs = {"token": model_args.access_token}
+    if ptq_args.attention_backend != "auto":
+        config_kwargs["attn_implementation"] = ptq_args.attention_backend
+    if ptq_args.p_bits < 16:
+        config_kwargs["attn_implementation"] = "eager"
     config = transformers.AutoConfig.from_pretrained(
-        model_args.input_model, token=model_args.access_token
+        model_args.input_model, **config_kwargs
     )
 
     # Llama v3.2 specific: Spinquant is not compatiable with tie_word_embeddings, clone lm_head from embed_tokens

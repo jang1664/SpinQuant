@@ -17,6 +17,29 @@ from utils.convert_to_executorch import (
     write_model_llama,
 )
 
+
+def add_probability_quantization(model, args):
+    """Attach row-wise dynamic fake quantizers to eager attention layers."""
+    if args.p_bits == 16:
+        return
+    attention_backend = getattr(model.config, "_attn_implementation", "eager")
+    if attention_backend != "eager":
+        raise ValueError(
+            f"P quantization requires eager attention, got {attention_backend!r}"
+        )
+    for layer in model.model.layers:
+        quantizer = quant_utils.ActQuantizer()
+        quantizer.configure(
+            bits=args.p_bits,
+            groupsize=args.p_groupsize,
+            sym=not args.p_asym,
+            clip_ratio=args.p_clip_ratio,
+        )
+        layer.self_attn.p_quantizer = quantizer
+    print(
+        f"Enabled {args.p_bits}-bit row-wise P quantization with eager attention"
+    )
+
 def ptq_model(args, model, model_args=None):
     transformers.set_seed(args.seed)
     model.eval()
@@ -140,13 +163,17 @@ def ptq_model(args, model, model_args=None):
                 clip_ratio=layer_a_clip,
             )
 
-    if args.k_bits < 16:
+    if args.q_bits < 16 or args.k_bits < 16:
         if args.k_pre_rope:
             raise NotImplementedError("Pre-RoPE quantization is not supported yet!")
         else:
             rope_function_name = "apply_rotary_pos_emb"
             layers = model.model.layers
-            k_quant_config = {
+            qk_quant_config = {
+                "q_bits": args.q_bits,
+                "q_groupsize": args.q_groupsize,
+                "q_sym": not (args.q_asym),
+                "q_clip_ratio": args.q_clip_ratio,
                 "k_bits": args.k_bits,
                 "k_groupsize": args.k_groupsize,
                 "k_sym": not (args.k_asym),
@@ -157,7 +184,9 @@ def ptq_model(args, model, model_args=None):
                     layer.self_attn,
                     rope_function_name,
                     config=model.config,
-                    **k_quant_config,
+                    **qk_quant_config,
                 )
+
+    add_probability_quantization(model, args)
 
     return model

@@ -5,6 +5,8 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 import datetime
+import hashlib
+import json
 from logging import Logger
 
 import torch
@@ -38,6 +40,42 @@ FIRST_GPU_ID = int(CUDA_DEVICES[0])
 print(FIRST_GPU_ID)
 GPU_ID = 0
 
+
+def file_sha256(path):
+    if not path or not os.path.isfile(path):
+        return None
+    digest = hashlib.sha256()
+    with open(path, "rb") as checkpoint_file:
+        for chunk in iter(lambda: checkpoint_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def quantization_metadata(model_args, ptq_args, model):
+    rotation_source = ptq_args.optimized_rotation_path
+    return {
+        "model": model_args.input_model,
+        "weight_bits": ptq_args.w_bits,
+        "activation_bits": ptq_args.a_bits,
+        "query_bits": ptq_args.q_bits,
+        "probability_bits": ptq_args.p_bits,
+        "key_bits": ptq_args.k_bits,
+        "value_bits": ptq_args.v_bits,
+        "query_groupsize": ptq_args.q_groupsize,
+        "probability_groupsize": ptq_args.p_groupsize,
+        "query_asymmetric": ptq_args.q_asym,
+        "probability_asymmetric": ptq_args.p_asym,
+        "query_clip_ratio": ptq_args.q_clip_ratio,
+        "probability_clip_ratio": ptq_args.p_clip_ratio,
+        "attention_backend": getattr(
+            model.config, "_attn_implementation", "eager"
+        ),
+        "seed": ptq_args.seed,
+        "rotate": ptq_args.rotate,
+        "rotation_checkpoint": rotation_source,
+        "rotation_checkpoint_sha256": file_sha256(rotation_source),
+    }
+
 # os.environ["CUDA_VISIBLE_DEVICES"] = str(FIRST_GPU_ID)
 # os.environ["LOCAL_RANK"] = str(FIRST_GPU_ID)
 
@@ -58,8 +96,14 @@ def train() -> None:
     log.info("the rank is {}".format(local_rank))
     torch.distributed.barrier()
 
+    config_kwargs = {"token": model_args.access_token}
+    if ptq_args.attention_backend != "auto":
+        config_kwargs["attn_implementation"] = ptq_args.attention_backend
+    if ptq_args.p_bits < 16:
+        config_kwargs["attn_implementation"] = "eager"
+        log.info("P quantization requested; forcing eager attention")
     config = transformers.AutoConfig.from_pretrained(
-        model_args.input_model, token=model_args.access_token
+        model_args.input_model, **config_kwargs
     )
     # Llama v3.2 specific: Spinquant is not compatiable with tie_word_embeddings, clone lm_head from embed_tokens
     process_word_embeddings = False
@@ -111,19 +155,33 @@ def train() -> None:
           device="cuda"
       )
       print(make_table(results))
+      results["spinquant_quantization"] = quantization_metadata(
+          model_args, ptq_args, model
+      )
 
+      os.makedirs("./results", exist_ok=True)
       if os.path.exists("./results/results.pkl"):
-        resultlist = pickle.load(open(f"./results/results.pkl", "rb"))
+        with open("./results/results.pkl", "rb") as results_file:
+          resultlist = pickle.load(results_file)
       else:
         resultlist = []
       del results['config']['model_args']['pretrained']
+
+      if ptq_args.results_path:
+        results_dir = os.path.dirname(ptq_args.results_path)
+        if results_dir:
+          os.makedirs(results_dir, exist_ok=True)
+        with open(ptq_args.results_path, "w", encoding="utf-8") as results_file:
+          json.dump(results, results_file, indent=2, ensure_ascii=False, default=str)
+
       resultlist.append({
           "model_args": model_args,
           "training_args": training_args,
           "ptq_args": ptq_args,
           "results": results
       })
-      pickle.dump(resultlist, open(f"./results/results.pkl", "wb"))
+      with open("./results/results.pkl", "wb") as results_file:
+        pickle.dump(resultlist, results_file)
     except Exception as e:
       print("Error in evaluation")
       print(e)
