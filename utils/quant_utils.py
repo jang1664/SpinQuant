@@ -108,6 +108,13 @@ class ActQuantizer(torch.nn.Module):
     self.zero = None
     self.scale = None
 
+  def extra_repr(self) -> str:
+    if self.bits == 16:
+      return "bits=16 (bypass)"
+    scheme = "symmetric" if getattr(self, "sym", False) else "asymmetric"
+    groupsize = getattr(self, "groupsize", -1)
+    return f"bits={self.bits}, {scheme}, groupsize={groupsize}"
+
   def forward(self, x):
     x_dtype = x.dtype
     if self.bits == 16:

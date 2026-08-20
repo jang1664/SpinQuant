@@ -189,6 +189,12 @@ class QKRotationWrapper(torch.nn.Module):
         clip_ratio=kwargs["k_clip_ratio"],
     )
 
+  def extra_repr(self):
+    return (
+        f"q_bits={self.q_bits}, k_bits={self.k_bits}, "
+        f"q_groupsize={self.q_groupsize}, k_groupsize={self.k_groupsize}"
+    )
+
   @staticmethod
   def _quantize_states(states, quantizer, groupsize):
     bsz, num_heads, seq_len, head_dim = states.shape

@@ -29,6 +29,13 @@ def test_aqp_argument_defaults_and_q_groupsize_fallback(monkeypatch):
     assert args.attention_backend == "auto"
 
 
+def test_quantizer_repr_exposes_configured_bit_width():
+    quantizer = ActQuantizer()
+    quantizer.configure(bits=8, groupsize=-1, sym=False, clip_ratio=1.0)
+    assert "bits=8" in repr(quantizer)
+    assert "asymmetric" in repr(quantizer)
+
+
 def test_probability_groupsize_rejects_ambiguous_grouping(monkeypatch):
     monkeypatch.setattr(
         sys, "argv", ["ptq.py", "--p_groupsize", "16"]

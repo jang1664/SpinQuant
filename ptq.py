@@ -148,7 +148,8 @@ def train() -> None:
       results = evaluator.simple_evaluate(
           model="hf",
           model_args={"pretrained" : model.to("cuda"),
-                      "tokenizer" : tokenizer},
+                      "tokenizer" : tokenizer,
+                      "max_length": training_args.model_max_length},
           tasks=task_names,
           num_fewshot=0,
           batch_size="auto",
@@ -185,6 +186,7 @@ def train() -> None:
     except Exception as e:
       print("Error in evaluation")
       print(e)
+      raise
 
     # testloader = data_utils.get_wikitext2(
     #     seed=ptq_args.seed,

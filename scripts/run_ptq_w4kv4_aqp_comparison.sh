@@ -17,6 +17,7 @@ ROTATION_CHECKPOINT=$2
 OUTPUT_DIR=$3
 CUDA_DEVICE=${CUDA_DEVICE:-0}
 WEIGHT_CHECKPOINT=${WEIGHT_CHECKPOINT:-"${OUTPUT_DIR}/w4-gptq.pt"}
+read -r -a AQP_BIT_VALUES <<< "${AQP_BITS:-16 4}"
 
 if [[ ! -f "${ROTATION_CHECKPOINT}" ]]; then
     echo "Rotation checkpoint not found: ${ROTATION_CHECKPOINT}" >&2
@@ -95,10 +96,20 @@ run_condition() {
         "${checkpoint_args[@]}" \
         --results_path "${result_path}" \
         2>&1 | tee -a "${log_path}"
+
+    if [[ ! -s "${result_path}" ]]; then
+        echo "[${name}] evaluation did not produce ${result_path}" >&2
+        return 1
+    fi
 }
 
 # Generate/reuse one rotated W4 checkpoint so W/KV/R1/R2 remain fixed.
-run_condition aqp16 16
-run_condition aqp4 4
+for aqp_bits in "${AQP_BIT_VALUES[@]}"; do
+    if (( aqp_bits < 1 || aqp_bits > 16 )); then
+        echo "Invalid AQP bit-width: ${aqp_bits}" >&2
+        exit 2
+    fi
+    run_condition "aqp${aqp_bits}" "${aqp_bits}"
+done
 
 echo "A/Q/P comparison complete: ${OUTPUT_DIR}/results"
