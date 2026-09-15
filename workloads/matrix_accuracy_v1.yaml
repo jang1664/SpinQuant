@@ -1,0 +1,57 @@
+version: 1
+description: >-
+  Pinned representative workload subset for direct FP16/AQP matrix-output
+  comparison.  Each MCQ source document expands into one request per choice.
+workloads:
+  wikitext:
+    adapter: legacy_wikitext
+    family: ppl
+    source: lm-eval WikiText samples from the pre-existing FP16 result JSON
+  c4_validation:
+    adapter: rolling_text
+    family: ppl
+    dataset: allenai/c4
+    dataset_config: en
+    split: validation
+    revision: 1588ec454efa1a09f29cd18ddd04fe05fc8653a2
+    text_key: text
+    source_documents: 8
+  arc_challenge:
+    adapter: mcq
+    family: zero_shot_mcq
+    dataset: ai2_arc
+    dataset_config: ARC-Challenge
+    split: validation
+    revision: 210d026faf9955653af8916fad021475a3f00453
+    id_key: id
+    source_documents: 16
+    num_fewshot: 0
+  hellaswag:
+    adapter: mcq
+    family: zero_shot_mcq
+    dataset: hellaswag
+    split: validation
+    revision: 218ec52e09a7e7462a5400043bb9a69a41d06b76
+    id_key: ind
+    source_documents: 16
+    num_fewshot: 0
+  winogrande:
+    adapter: mcq
+    family: zero_shot_mcq
+    dataset: winogrande
+    dataset_config: winogrande_xl
+    split: validation
+    revision: 01e74176c63542e6b0bcb004dcdea22d94fb67b5
+    id_key: sentence
+    source_documents: 16
+    num_fewshot: 0
+  ruler_niah_single_1_2k:
+    adapter: ruler_niah
+    family: long_context_stress
+    ruler_repo: https://github.com/NVIDIA/RULER
+    ruler_revision: c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a
+    ruler_task: niah_single_1
+    seed: 42
+    context_length: 2048
+    examples: 4
+    jsonl: workloads/ruler_niah_single_1_2k/validation.jsonl

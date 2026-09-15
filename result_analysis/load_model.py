@@ -92,7 +92,6 @@ def load_model(
 
     # Add any additional kwargs as arguments
     for key, value in kwargs.items():
-        key = key.replace("_", "-")
         if isinstance(value, bool):
             if value:
                 args.append(f"--{key}")
@@ -139,6 +138,11 @@ def load_model(
     model.to(device)
 
     model = ptq_model(ptq_args, model, model_args)
+    # rotate_model performs high-precision rotations on CUDA and writes the
+    # resulting weights back to CPU.  Analysis callers use this loader
+    # directly (unlike ptq.py), so restore a single coherent execution device
+    # after all PTQ transformations and checkpoint loading are complete.
+    model = model.to(device)
     model.seqlen = training_args.model_max_length
     
     log.info("Model PTQ completed {}".format(model))

@@ -11,6 +11,7 @@ from eval_utils.rotation_utils import QKRotationWrapper
 from utils.quant_utils import ActQuantizer
 from utils.process_args import parser_gen
 from utils.utils import HadamardTransform
+from utils.matrix_output_metrics import MatrixOutputObserver, comparison
 
 
 def parse_spinquant_args(monkeypatch, *args):
@@ -226,6 +227,58 @@ def test_p16_is_a_strict_configuration_bypass():
     )
     add_probability_quantization(model, SimpleNamespace(p_bits=16))
     assert attention.p_quantizer is sentinel
+
+
+def test_matrix_output_observer_compares_only_paired_records():
+    observer = MatrixOutputObserver()
+    reference = torch.tensor([[1.0, -2.0]])
+    quantized = torch.tensor([[2.0, -1.0]])
+    observer.begin_reference()
+    for group in ("Linear", "QK", "PV"):
+        observer.record(group, f"{group}.0", reference)
+    observer.begin_candidate()
+    for group in ("Linear", "QK", "PV"):
+        observer.record(group, f"{group}.0", quantized)
+    observer.finish_candidate()
+
+    metrics = observer.results()
+    assert set(metrics) == {"Linear", "QK", "PV"}
+    assert metrics["QK"]["elements"] == 2
+    assert metrics["PV"]["mae"] == pytest.approx(1.0)
+    relative = comparison(metrics["Linear"], metrics["Linear"])
+    assert relative["rmse"]["difference"] == 0.0
+    assert relative["rmse"]["ratio"] == 1.0
+
+
+def test_matrix_output_observer_requires_matching_keys():
+    observer = MatrixOutputObserver()
+    observer.begin_reference()
+    observer.record("QK", "qk.0", torch.ones(1))
+    observer.begin_candidate()
+    with pytest.raises(ValueError, match="missing reference"):
+        observer.record("QK", "qk.1", torch.ones(1))
+
+
+def test_eager_attention_observes_raw_qk_and_pv_outputs():
+    torch.manual_seed(0)
+    attention = LlamaAttention(tiny_llama_config(), layer_idx=0).eval()
+    observer = MatrixOutputObserver()
+    attention.matrix_output_observer = observer
+    hidden_states = torch.randn(1, 5, 32)
+    position_ids = torch.arange(5).unsqueeze(0)
+    observer.begin_reference()
+    observer.record("Linear", "synthetic.linear", hidden_states)
+    attention(hidden_states, position_ids=position_ids)
+    observer.begin_candidate()
+    observer.record("Linear", "synthetic.linear", hidden_states)
+    attention(hidden_states, position_ids=position_ids)
+    observer.finish_candidate()
+
+    metrics = observer.results()
+    assert metrics["QK"]["elements"] == 1 * 4 * 5 * 5
+    assert metrics["PV"]["elements"] == 1 * 4 * 5 * 8
+    assert metrics["QK"]["max_abs_error"] == 0.0
+    assert metrics["PV"]["cosine_similarity"] == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("num_key_value_heads", [4, 2])

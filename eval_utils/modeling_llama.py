@@ -522,9 +522,13 @@ class LlamaAttention(nn.Module):
           value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         with measure("attn_weights_cal"):
-          attn_weights = torch.matmul(
-              query_states, key_states.transpose(2, 3)
-          ) / math.sqrt(self.head_dim)
+          qk_output = torch.matmul(query_states, key_states.transpose(2, 3))
+          matrix_output_observer = getattr(self, "matrix_output_observer", None)
+          if matrix_output_observer is not None:
+              matrix_output_observer.record(
+                  "QK", f"model.layers.{self.layer_idx}.self_attn.qk", qk_output
+              )
+          attn_weights = qk_output / math.sqrt(self.head_dim)
 
           if attention_mask is not None:  # no matter the length, we just slice it
               causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
@@ -550,6 +554,10 @@ class LlamaAttention(nn.Module):
 
         with measure("attn_output"):
           attn_output = torch.matmul(attn_weights, value_states)
+          if matrix_output_observer is not None:
+              matrix_output_observer.record(
+                  "PV", f"model.layers.{self.layer_idx}.self_attn.pv", attn_output
+              )
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(

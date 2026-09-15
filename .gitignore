@@ -1,4 +1,5 @@
 __pycache__/
+.venv-matrix-accuracy/
 rotation_llama-2-7b
 saved_models
 *.log
