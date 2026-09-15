@@ -1,0 +1,174 @@
+{
+  "environment": {
+    "python": "3.10.16",
+    "torch": "2.7.0+cu126",
+    "torch_cuda": "12.6",
+    "device": "NVIDIA RTX A6000"
+  },
+  "seed": 0,
+  "config": {
+    "weight_bits": 4,
+    "group_size": 32,
+    "mxu_rows": 32,
+    "extra_bits": 19,
+    "reduce_extra_bits": 10,
+    "n_chunk_size": 256
+  },
+  "asymmetric": false,
+  "accuracy": {
+    "fpint_torch_vs_reference": {
+      "allclose": true,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "rms": 0.0,
+      "outside_tolerance_fraction": 0.0,
+      "atol": 0.001,
+      "rtol": 0.001
+    },
+    "fpint_cuda_vs_reference": {
+      "allclose": true,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "rms": 0.0,
+      "outside_tolerance_fraction": 0.0,
+      "atol": 0.001,
+      "rtol": 0.001
+    },
+    "fpint_cuda_vs_qdq": {
+      "allclose": true,
+      "max_abs": 0.00390625,
+      "mean_abs": 0.000307327980408445,
+      "rms": 0.0006185797974467278,
+      "outside_tolerance_fraction": 0.0,
+      "atol": 0.001,
+      "rtol": 0.001
+    }
+  },
+  "benchmarks": [
+    {
+      "shape": {
+        "m": 1,
+        "k": 3072,
+        "n": 3072
+      },
+      "weight_preparation_ms": 2.9886730044381693,
+      "methods": {
+        "standard_predequantized": {
+          "latency_ms": 0.2373855997575447,
+          "peak_increment_bytes": 6144,
+          "finite": true
+        },
+        "dequantize_plus_linear": {
+          "latency_ms": 1.306677701359149,
+          "peak_increment_bytes": 113270784,
+          "finite": true
+        },
+        "fpint_cuda": {
+          "latency_ms": 0.4766638987348415,
+          "peak_increment_bytes": 6144,
+          "finite": true
+        }
+      }
+    },
+    {
+      "shape": {
+        "m": 1,
+        "k": 3072,
+        "n": 8192
+      },
+      "weight_preparation_ms": 2.312123993760906,
+      "methods": {
+        "standard_predequantized": {
+          "latency_ms": 0.28993969899602234,
+          "peak_increment_bytes": 16384,
+          "finite": true
+        },
+        "dequantize_plus_linear": {
+          "latency_ms": 2.723142900504172,
+          "peak_increment_bytes": 302014464,
+          "finite": true
+        },
+        "fpint_cuda": {
+          "latency_ms": 0.5026929007726721,
+          "peak_increment_bytes": 16384,
+          "finite": true
+        }
+      }
+    },
+    {
+      "shape": {
+        "m": 1,
+        "k": 8192,
+        "n": 3072
+      },
+      "weight_preparation_ms": 1.9939369958592579,
+      "methods": {
+        "standard_predequantized": {
+          "latency_ms": 0.08990229980554432,
+          "peak_increment_bytes": 6144,
+          "finite": true
+        },
+        "dequantize_plus_linear": {
+          "latency_ms": 2.718245300638955,
+          "peak_increment_bytes": 302055424,
+          "finite": true
+        },
+        "fpint_cuda": {
+          "latency_ms": 0.8759303003898822,
+          "peak_increment_bytes": 6144,
+          "finite": true
+        }
+      }
+    },
+    {
+      "shape": {
+        "m": 32,
+        "k": 3072,
+        "n": 8192
+      },
+      "weight_preparation_ms": 2.27985400124453,
+      "methods": {
+        "standard_predequantized": {
+          "latency_ms": 0.1985394992516376,
+          "peak_increment_bytes": 524288,
+          "finite": true
+        },
+        "dequantize_plus_linear": {
+          "latency_ms": 2.4421356996754184,
+          "peak_increment_bytes": 302014464,
+          "finite": true
+        },
+        "fpint_cuda": {
+          "latency_ms": 2.666572899033781,
+          "peak_increment_bytes": 524288,
+          "finite": true
+        }
+      }
+    },
+    {
+      "shape": {
+        "m": 32,
+        "k": 8192,
+        "n": 3072
+      },
+      "weight_preparation_ms": 2.3303990019485354,
+      "methods": {
+        "standard_predequantized": {
+          "latency_ms": 0.09239710052497685,
+          "peak_increment_bytes": 196608,
+          "finite": true
+        },
+        "dequantize_plus_linear": {
+          "latency_ms": 2.7587365999352187,
+          "peak_increment_bytes": 302055424,
+          "finite": true
+        },
+        "fpint_cuda": {
+          "latency_ms": 3.2194586005061865,
+          "peak_increment_bytes": 196608,
+          "finite": true
+        }
+      }
+    }
+  ]
+}

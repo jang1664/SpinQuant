@@ -1,0 +1,30 @@
+ENV 2.7.0+cu128 12.8 /home/jaeyong.jang/.conda/envs/spinquant
+ARCH ['sm_75', 'sm_80', 'sm_86', 'sm_90', 'sm_100', 'sm_120', 'compute_120']
+IMPORT_OK transformers 4.44.2
+IMPORT_OK accelerate 0.34.2
+IMPORT_OK datasets 4.8.5
+Importing quant utils. ZP_INT8: 0, SIGNED_KV: 0, ZP_CLAMP: 1, SCALE_NO_UPCAST: 0
+IMPORT_OK eval_utils.main
+IMPORT_OK result_analysis.load_model
+GPU_AND_HADAMARD_OK 0 NVIDIA RTX PRO 6000 Blackwell Server Edition (12, 0)
+GPU_AND_HADAMARD_OK 1 NVIDIA RTX PRO 6000 Blackwell Server Edition (12, 0)
+GPU_AND_HADAMARD_OK 2 NVIDIA RTX PRO 6000 Blackwell Server Edition (12, 0)
+GPU_AND_HADAMARD_OK 3 NVIDIA RTX PRO 6000 Blackwell Server Edition (12, 0)
+Detected CUDA files, patching ldflags
+Emitting ninja build file /tmp/spinquant-cuda-smoke-dglfatz2/build.ninja...
+Building extension module spinquant_blackwell_smoke...
+Using envvar MAX_JOBS (2) as the number of workers...
+[1/3] /usr/bin/g++ -MMD -MF main.o.d -DTORCH_EXTENSION_NAME=spinquant_blackwell_smoke -DTORCH_API_INCLUDE_EXTENSION_H -DPYBIND11_COMPILER_TYPE=\"_gcc\" -DPYBIND11_STDLIB=\"_libstdcpp\" -DPYBIND11_BUILD_ABI=\"_cxxabi1016\" -isystem /home/jaeyong.jang/.conda/envs/spinquant/lib/python3.10/site-packages/torch/include -isystem /home/jaeyong.jang/.conda/envs/spinquant/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -isystem /home/jaeyong.jang/.conda/envs/spinquant/include -isystem /home/jaeyong.jang/.conda/envs/spinquant/include/python3.10 -D_GLIBCXX_USE_CXX11_ABI=1 -fPIC -std=c++17 -c /tmp/spinquant-cuda-smoke-dglfatz2/main.cpp -o main.o
+[2/3] /home/jaeyong.jang/.conda/envs/spinquant/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -ccbin /usr/bin/gcc -DTORCH_EXTENSION_NAME=spinquant_blackwell_smoke -DTORCH_API_INCLUDE_EXTENSION_H -DPYBIND11_COMPILER_TYPE=\"_gcc\" -DPYBIND11_STDLIB=\"_libstdcpp\" -DPYBIND11_BUILD_ABI=\"_cxxabi1016\" -isystem /home/jaeyong.jang/.conda/envs/spinquant/lib/python3.10/site-packages/torch/include -isystem /home/jaeyong.jang/.conda/envs/spinquant/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -isystem /home/jaeyong.jang/.conda/envs/spinquant/include -isystem /home/jaeyong.jang/.conda/envs/spinquant/include/python3.10 -D_GLIBCXX_USE_CXX11_ABI=1 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_120,code=sm_120 --compiler-options '-fPIC' -std=c++17 -c /tmp/spinquant-cuda-smoke-dglfatz2/cuda.cu -o cuda.cuda.o
+nvcc warning : incompatible redefinition for option 'compiler-bindir', the last value of this option was used
+[3/3] /usr/bin/g++ main.o cuda.cuda.o -shared -L/home/jaeyong.jang/.conda/envs/spinquant/lib/python3.10/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/home/jaeyong.jang/.conda/envs/spinquant/lib -lcudart -o spinquant_blackwell_smoke.so
+Loading extension module spinquant_blackwell_smoke...
+CUSTOM_CUDA_BUILD_STREAM_RUN_OK
+QCOL_REFERENCE_ALLCLOSE_OK 4 False 0.0
+QCOL_REFERENCE_ALLCLOSE_OK 4 True 0.0
+QCOL_REFERENCE_ALLCLOSE_OK 8 False 0.0
+QCOL_REFERENCE_ALLCLOSE_OK 8 True 0.0
+TIMING_MS PREDEQUANTIZED_MATMUL 0.024349898740183562 finite True
+TIMING_MS DEQUANTIZE_PLUS_MATMUL 0.06340749969240278 finite True
+TIMING_MS SOURCE_FPINT_QCOL 0.5633697001030669 finite True
+ALL_SMOKE_CHECKS_PASSED

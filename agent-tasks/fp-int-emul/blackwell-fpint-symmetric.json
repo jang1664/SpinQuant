@@ -1,0 +1,155 @@
+{
+  "environment": {
+    "python": "3.10.16",
+    "torch": "2.7.0+cu128",
+    "torch_cuda": "12.8",
+    "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+  },
+  "seed": 0,
+  "config": {
+    "weight_bits": 4,
+    "group_size": 32,
+    "mxu_rows": 32,
+    "extra_bits": 19,
+    "reduce_extra_bits": 10,
+    "n_chunk_size": 256
+  },
+  "asymmetric": false,
+  "accuracy": {
+    "fpint_torch_vs_reference": {
+      "allclose": true,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "rms": 0.0,
+      "outside_tolerance_fraction": 0.0,
+      "atol": 0.001,
+      "rtol": 0.001
+    },
+    "fpint_cuda_vs_reference": {
+      "allclose": true,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "rms": 0.0,
+      "outside_tolerance_fraction": 0.0,
+      "atol": 0.001,
+      "rtol": 0.001
+    },
+    "fpint_cuda_vs_qdq": {
+      "allclose": true,
+      "max_abs": 0.00390625,
+      "mean_abs": 0.000307327980408445,
+      "rms": 0.0006185797974467278,
+      "outside_tolerance_fraction": 0.0,
+      "atol": 0.001,
+      "rtol": 0.001
+    }
+  },
+  "benchmarks": [
+    {
+      "shape": {
+        "m": 1,
+        "k": 3072,
+        "n": 3072
+      },
+      "weight_preparation_ms": 1.0028419928858057,
+      "methods": {
+        "standard_predequantized": {
+          "latency_ms": 0.013665299775311723,
+          "peak_increment_bytes": 6144,
+          "finite": true
+        },
+        "dequantize_plus_linear": {
+          "latency_ms": 0.200897049944615,
+          "peak_increment_bytes": 113270784,
+          "finite": true
+        },
+        "fpint_cuda": {
+          "latency_ms": 0.23426685002050363,
+          "peak_increment_bytes": 6144,
+          "finite": true
+        }
+      }
+    },
+    {
+      "shape": {
+        "m": 32,
+        "k": 3072,
+        "n": 3072
+      },
+      "weight_preparation_ms": 0.19700599659699947,
+      "methods": {
+        "standard_predequantized": {
+          "latency_ms": 0.015381800039904192,
+          "peak_increment_bytes": 196608,
+          "finite": true
+        },
+        "dequantize_plus_linear": {
+          "latency_ms": 0.20464284971239977,
+          "peak_increment_bytes": 113270784,
+          "finite": true
+        },
+        "fpint_cuda": {
+          "latency_ms": 0.37018735019955784,
+          "peak_increment_bytes": 196608,
+          "finite": true
+        }
+      }
+    }
+  ],
+  "tiny_model": {
+    "latency_ms": 1.2807975501345936,
+    "peak_increment_bytes": 79360,
+    "finite": true,
+    "coverage": [
+      {
+        "name": "model.layers.0.self_attn.q_proj",
+        "backend": "fpint_cuda",
+        "reason": "",
+        "bits": 4
+      },
+      {
+        "name": "model.layers.0.self_attn.k_proj",
+        "backend": "fpint_cuda",
+        "reason": "",
+        "bits": 4
+      },
+      {
+        "name": "model.layers.0.self_attn.v_proj",
+        "backend": "fpint_cuda",
+        "reason": "",
+        "bits": 4
+      },
+      {
+        "name": "model.layers.0.self_attn.o_proj",
+        "backend": "fpint_cuda",
+        "reason": "",
+        "bits": 4
+      },
+      {
+        "name": "model.layers.0.mlp.gate_proj",
+        "backend": "fpint_cuda",
+        "reason": "",
+        "bits": 4
+      },
+      {
+        "name": "model.layers.0.mlp.up_proj",
+        "backend": "fpint_cuda",
+        "reason": "",
+        "bits": 4
+      },
+      {
+        "name": "model.layers.0.mlp.down_proj",
+        "backend": "fpint_cuda",
+        "reason": "",
+        "bits": 4
+      },
+      {
+        "name": "lm_head",
+        "backend": "standard",
+        "reason": "lm_head remains in floating point",
+        "bits": null
+      }
+    ],
+    "sequence_length": 32
+  }
+}

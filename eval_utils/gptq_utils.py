@@ -56,8 +56,9 @@ class GPTQ:
         W = W.float()
         Scale = self.layer.weight.data.clone()
         Scale = Scale.float()
+        Zero = torch.zeros_like(Scale, dtype=torch.int32)
         W_int = self.layer.weight.data.clone()
-        W_int = W_int.float()
+        W_int = W_int.to(torch.int8)
 
         tick = time.time()
 
@@ -100,8 +101,9 @@ class GPTQ:
 
             W1 = W[:, i1:i2].clone()
             Q1 = torch.zeros_like(W1)
-            W_int1 = torch.zeros_like(W1)
+            W_int1 = torch.zeros_like(W1, dtype=torch.int8)
             Scale1 = torch.zeros_like(W1).to(Scale.dtype)
+            Zero1 = torch.zeros_like(W1, dtype=torch.int32)
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
             Hinv1 = Hinv[i1:i2, i1:i2]
@@ -122,11 +124,14 @@ class GPTQ:
                             idx = perm[idx]
                         self.quantizer = groups[idx // groupsize]
 
-                q, int_weight, scale = self.quantizer.fake_quantize(w.unsqueeze(1))
+                q, int_weight, scale, zero = (
+                    self.quantizer.fake_quantize_with_metadata(w.unsqueeze(1))
+                )
                 Q1[:, i] = q.flatten()
                 q = q.flatten()
                 W_int1[:, i] = int_weight.flatten()
                 Scale1[:, i] = scale.flatten()
+                Zero1[:, i] = zero.flatten()
 
                 Losses1[:, i] = (w - q) ** 2 / d**2
 
@@ -137,6 +142,7 @@ class GPTQ:
             Q[:, i1:i2] = Q1
             W_int[:, i1:i2] = W_int1
             Scale[:, i1:i2] = Scale1
+            Zero[:, i1:i2] = Zero1
             Losses[:, i1:i2] = Losses1 / 2
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
@@ -145,6 +151,32 @@ class GPTQ:
 
         if actorder:
             Q = Q[:, invperm]
+            W_int = W_int[:, invperm]
+            Scale = Scale[:, invperm]
+            Zero = Zero[:, invperm]
+
+        if groupsize == -1:
+            group_index = torch.zeros(
+                self.columns, device=W.device, dtype=torch.long
+            )
+        elif actorder and not static_groups:
+            # invperm[original_k] gives the corresponding position in the
+            # act-order quantization sequence.
+            group_index = invperm // groupsize
+        else:
+            group_index = torch.arange(
+                self.columns, device=W.device, dtype=torch.long
+            ) // groupsize
+
+        quant_utils.stash_fpint_metadata(
+            self.layer,
+            integer_weight=W_int.reshape(self.layer.weight.shape),
+            expanded_scale=Scale,
+            expanded_zero=Zero,
+            bits=self.quantizer.bits,
+            group_size=groupsize,
+            group_index=group_index,
+        )
 
         if export_to_et:
             self.layer.register_buffer(
@@ -349,8 +381,16 @@ def rtn_fwrd(model, dev, args, custom_layers=None):
             )
             W = subset[name].weight.data
             quantizer.find_params(W)
-            q, int_weight, scale = quantizer.fake_quantize(W)
+            q, int_weight, scale, zero = quantizer.fake_quantize_with_metadata(W)
             subset[name].weight.data = q.to(next(iter(layer.parameters())).dtype)
+            quant_utils.stash_fpint_metadata(
+                subset[name],
+                integer_weight=int_weight,
+                expanded_scale=scale,
+                expanded_zero=zero,
+                bits=layer_weight_bits,
+                group_size=w_groupsize,
+            )
             if args.export_to_et:
                 subset[name].register_buffer("int_weight", int_weight)
                 subset[name].register_buffer("scale", scale)

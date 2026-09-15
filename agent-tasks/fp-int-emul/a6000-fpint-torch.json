@@ -1,0 +1,64 @@
+{
+  "environment": {
+    "python": "3.10.16",
+    "torch": "2.7.0+cu126",
+    "torch_cuda": "12.6",
+    "device": "NVIDIA RTX A6000"
+  },
+  "seed": 0,
+  "config": {
+    "weight_bits": 4,
+    "group_size": 32,
+    "mxu_rows": 32,
+    "extra_bits": 19,
+    "reduce_extra_bits": 10,
+    "n_chunk_size": 256
+  },
+  "asymmetric": false,
+  "accuracy": {
+    "fpint_torch_vs_reference": {
+      "allclose": true,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "rms": 0.0,
+      "outside_tolerance_fraction": 0.0,
+      "atol": 0.001,
+      "rtol": 0.001
+    },
+    "fpint_cuda_vs_reference": {
+      "allclose": true,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "rms": 0.0,
+      "outside_tolerance_fraction": 0.0,
+      "atol": 0.001,
+      "rtol": 0.001
+    },
+    "fpint_cuda_vs_qdq": {
+      "allclose": true,
+      "max_abs": 0.00390625,
+      "mean_abs": 0.000307327980408445,
+      "rms": 0.0006185797974467278,
+      "outside_tolerance_fraction": 0.0,
+      "atol": 0.001,
+      "rtol": 0.001
+    }
+  },
+  "benchmarks": [
+    {
+      "shape": {
+        "m": 1,
+        "k": 3072,
+        "n": 3072
+      },
+      "weight_preparation_ms": 2.3684390034759417,
+      "methods": {
+        "fpint_torch": {
+          "latency_ms": 164.2802610003855,
+          "peak_increment_bytes": 175616,
+          "finite": true
+        }
+      }
+    }
+  ]
+}

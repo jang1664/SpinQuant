@@ -30,6 +30,10 @@ def load_model(
     per_device_eval_batch_size=4,
     model_max_length=2048,
     device="cuda",
+    linear_backend="standard",
+    fpint_mxu_rows=32,
+    fpint_extra_bits=19,
+    fpint_reduce_extra_bits=10,
     **kwargs
 ):
     """
@@ -76,6 +80,10 @@ def load_model(
         "--v_bits", str(v_bits),
         "--k_groupsize", str(k_groupsize),
         "--v_groupsize", str(v_groupsize),
+        "--linear_backend", linear_backend,
+        "--fpint_mxu_rows", str(fpint_mxu_rows),
+        "--fpint_extra_bits", str(fpint_extra_bits),
+        "--fpint_reduce_extra_bits", str(fpint_reduce_extra_bits),
     ]
 
     if w_clip: args.append("--w_clip")

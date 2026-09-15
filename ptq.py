@@ -66,6 +66,13 @@ def quantization_metadata(model_args, training_args, ptq_args, model, task_names
         "attention_backend": getattr(
             model.config, "_attn_implementation", "eager"
         ),
+        "linear_backend": getattr(ptq_args, "linear_backend", "standard"),
+        "fpint_mxu_rows": getattr(ptq_args, "fpint_mxu_rows", 32),
+        "fpint_extra_bits": getattr(ptq_args, "fpint_extra_bits", 19),
+        "fpint_reduce_extra_bits": getattr(
+            ptq_args, "fpint_reduce_extra_bits", 10
+        ),
+        "fpint_linear_coverage": getattr(model, "fpint_linear_coverage", []),
         "seed": ptq_args.seed,
         "rotate": ptq_args.rotate,
         "rotation_checkpoint": rotation_source,

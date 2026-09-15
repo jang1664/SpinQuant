@@ -172,6 +172,33 @@ def parser_gen():
         help="Use INT8 for Down Projection! If this set, both weights and activations of this layer will be in INT8",
     )
 
+    # FP16 x integer Linear hardware emulation
+    parser.add_argument(
+        "--linear_backend",
+        type=str,
+        default="standard",
+        choices=["standard", "fpint_torch", "fpint_cuda"],
+        help="Linear execution backend; standard preserves the existing path",
+    )
+    parser.add_argument(
+        "--fpint_mxu_rows",
+        type=int,
+        default=32,
+        help="K reduction width used for FP16 exponent alignment",
+    )
+    parser.add_argument(
+        "--fpint_extra_bits",
+        type=int,
+        default=19,
+        help="Extra fixed-point bits for the main integer MAC path",
+    )
+    parser.add_argument(
+        "--fpint_reduce_extra_bits",
+        type=int,
+        default=10,
+        help="Extra fixed-point bits for the zero-point reduction path",
+    )
+
     # KV-Cache Quantization Arguments
     parser.add_argument(
         "--v_bits",
@@ -362,6 +389,19 @@ def parser_gen():
     for name in ("a_bits", "w_bits", "v_bits", "k_bits", "q_bits", "p_bits"):
         if getattr(args, name) < 1 or getattr(args, name) > 16:
             parser.error(f"--{name} must be between 1 and 16")
+    if args.linear_backend != "standard":
+        if args.w_bits not in (4, 8):
+            parser.error("FPINT Linear requires --w_bits 4 or 8")
+        if args.fpint_mxu_rows <= 0:
+            parser.error("--fpint_mxu_rows must be positive")
+        if args.w_groupsize > 0 and args.w_groupsize % args.fpint_mxu_rows != 0:
+            parser.error(
+                "--w_groupsize must be -1 or a multiple of --fpint_mxu_rows"
+            )
+        if args.fpint_extra_bits < args.fpint_reduce_extra_bits:
+            parser.error(
+                "--fpint_extra_bits must be >= --fpint_reduce_extra_bits"
+            )
 
     # assert (
     #     args.a_groupsize == args.w_groupsize

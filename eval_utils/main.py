@@ -81,6 +81,11 @@ def ptq_model(args, model, model_args=None):
             ), "Cannot save a quantized model if it is already loaded!"
             print("Load quantized model from ", args.load_qmodel_path)
             save_dict = torch.load(args.load_qmodel_path, weights_only=False)
+            fpint_version = save_dict.get("fpint_format_version")
+            if fpint_version not in (None, 1):
+                raise ValueError(
+                    f"Unsupported FPINT checkpoint format version: {fpint_version}"
+                )
             model.load_state_dict(save_dict["model"])
 
         elif not args.w_rtn:  # GPTQ Weight Quantization
@@ -106,7 +111,10 @@ def ptq_model(args, model, model_args=None):
             quantizers = gptq_utils.rtn_fwrd(model, "cuda", args)
             save_dict["w_quantizers"] = quantizers
 
+        quant_utils.configure_fpint_linears(model, args)
+
         if args.save_qmodel_path:
+            save_dict["fpint_format_version"] = 1
             save_dict["model"] = model.state_dict()
             if args.export_to_et:
                 save_dict = write_model_llama(
@@ -116,6 +124,10 @@ def ptq_model(args, model, model_args=None):
                     save_dict, group_size=args.w_groupsize
                 )
             torch.save(save_dict, args.save_qmodel_path)
+    else:
+        if getattr(args, "linear_backend", "standard") != "standard":
+            raise ValueError("FPINT Linear requires 4-bit or 8-bit weight quantization")
+        quant_utils.configure_fpint_linears(model, args)
 
     # Add Input Quantization
     if args.a_bits < 16 or args.v_bits < 16:

@@ -77,7 +77,20 @@ TORCH_CUDA_ARCH_LIST=8.6 MAX_JOBS=2 \
 - 설치된 `fast_hadamard_transform`을 FP16 CUDA tensor에 실행하여 finite 출력 확인.
 - PyTorch `load_inline`으로 C++/CUDA extension을 SM 8.6 대상으로 실제 컴파일·링크·로드했다. Current CUDA stream에서 실행하는 간단한 커널의 출력이 기대값과 일치했다.
 - 재현용 임시 스크립트: `/tmp/spinquant-env-check.0wknN1/check.py`. 같은 폴더에 빌드 산출물이 있다. `/tmp` 파일은 장기 보관용이 아니며 최종 backend 구현 시 정식 smoke test로 대체한다.
-- GPU 4개는 모두 인식했으며 실제 연산/extension smoke test는 GPU 0에서 수행했다. 전체 모델 checkpoint 로딩·평가, 기존 `prealign` 커널 자체의 빌드, 목표 FP×INT kernel의 수치·성능 검증은 아직 수행하지 않았다.
+- GPU 4개는 모두 인식했다. 초기 환경 점검 후 목표 FP×INT kernel을 구현해 GPU 0 수치·성능, non-default stream, GPU 1 device guard까지 검증했다. 전체 3B/7B checkpoint 평가는 수행하지 않았다.
+
+### Blackwell / berlin1 이식 상태 (2026-09-15)
+
+- 현재 환경을 [spinquant-source-environment.yml](spinquant-source-environment.yml)로 `conda env export --no-builds` 했다. 이는 현재 머신의 원본 snapshot이며 원격 설치용 manifest로 그대로 사용하지 않는다.
+- 원본 PyTorch는 `2.7.0+cu126`이며 확인된 binary arch 목록에는 Blackwell이 없다. [PyTorch 2.7 공식 릴리스](https://pytorch.org/blog/pytorch-2-7/)에 따라 같은 2.7.0의 CUDA 12.8 wheel로 설치했다.
+- Export에는 CUDA 11/12 관련 pip package가 함께 있고 머신 고유 `prefix`도 있다. 원격용 환경은 이 항목을 정리하고 PyTorch CUDA 12.8 wheel의 의존성으로 CUDA runtime package를 해결한다. GPU 빌드 계열을 바꾸면서 기존 NVIDIA package pin을 그대로 강제하지 않는다.
+- SSH 인증 복구 후 `/home/jaeyong.jang/.conda/envs/spinquant`를 새로 생성했다. 기존 `CIM` 환경과 시스템 CUDA 13.0은 변경하지 않았다.
+- 서버: x86_64, RTX PRO 6000 Blackwell Server Edition × 4 (각 97887 MiB), compute capability 12.0, driver 580.126.20.
+- 설치: Python 3.10.16, PyTorch 2.7.0+cu128, torchvision 0.22.0+cu128, torchaudio 2.7.0+cu128, conda CUDA toolkit 12.8 (nvcc 12.8.93). 나머지 Python 패키지는 [berlin1-requirements.txt](berlin1-requirements.txt)의 원본 export 버전을 사용했다.
+- `fast_hadamard_transform` 로컬 소스를 전송해 [berlin1-hadamard-setup.py](berlin1-hadamard-setup.py)의 `compute_120/sm_120` 대상으로 재빌드했다. 버전은 1.0.4.post1이며 Blackwell 4개 GPU 모두에서 실행 및 Hadamard 왕복 allclose 검증을 통과했다.
+- conda 환경에 `CUDA_HOME`, toolkit header용 `CPATH`, `TORCH_CUDA_ARCH_LIST=12.0`, `MAX_JOBS=2`를 설정했다. [berlin1-activate.sh](berlin1-activate.sh)를 activation hook으로 설치해 host compiler를 시스템 GCC/G++ 13.3으로 통일했다.
+- `pip check`, 주요 모델 모듈 import, GPU 행렬곱과 Hadamard가 통과했다. 이후 실제 FP×INT CUDA kernel을 SM120으로 build했고 최종 FP×INT test 40개와 실제 projection/tiny-model benchmark를 통과했다.
+- 실행 위치: `/home/jaeyong.jang/spinquant-setup.fP5oR2/source`. [BERLIN1_RESULTS.md](BERLIN1_RESULTS.md)에 재실행 명령, 측정 수치, 검증 한계를 기록했다. 설치 결과 snapshot은 [spinquant-berlin1-environment.yml](spinquant-berlin1-environment.yml), 로그는 [berlin1-smoke.log](berlin1-smoke.log)다.
 
 ## Reference
 
@@ -244,5 +257,9 @@ Prealignment는 vectorize하고, M/N 방향으로 작업을 나누어 큰 중간
 4. 기존 standard 실행과 Q/P/K/V 양자화·Hadamard 동작이 유지된다.
 5. 실제 shape 및 작은 모델 실행의 수치·latency·메모리 보고서와 재현 명령이 있다.
 6. 사용자가 성능을 판단할 수 있는 PyTorch 실행 경로를 먼저 전달한다. 부족하다고 판단되면 이 계획의 CUDA 단계를 이어 수행하고 같은 검증/보고서를 제공한다.
+
+## 수행 결과 (2026-09-15)
+
+위 완료 조건에 해당하는 reference, Torch backend, custom CUDA backend, quantization/checkpoint 연결, 테스트와 benchmark를 구현했다. 순차 Torch backend의 실제 shape 성능이 부족해 CUDA 단계까지 수행했다. 구현 파일, 수치 범위, A6000/Blackwell 성능, 재현 명령 및 알려진 제한은 [IMPLEMENTATION_RESULTS.md](IMPLEMENTATION_RESULTS.md)에 기록했다.
 
 현재 문서는 계획만 작성한 상태다. Backend 구현, 파일 이식, benchmark 실행은 후속 작업이다.
