@@ -209,7 +209,9 @@ def benchmark_shape(shape, config, asymmetric, device, seed, warmup, iterations,
     return result
 
 
-def run_tiny_model(device, backend, asymmetric, seed, warmup, iterations):
+def run_tiny_model(
+    device, backend, asymmetric, seed, warmup, iterations, fpint_config
+):
     from transformers import LlamaConfig
 
     from eval_utils.gptq_utils import rtn_fwrd
@@ -217,13 +219,15 @@ def run_tiny_model(device, backend, asymmetric, seed, warmup, iterations):
     from utils.quant_utils import add_actquant, configure_fpint_linears
 
     torch.manual_seed(seed)
+    hidden_size = max(64, fpint_config.mxu_rows)
+    intermediate_size = max(128, 2 * hidden_size)
     config = LlamaConfig(
         vocab_size=128,
-        hidden_size=64,
-        intermediate_size=128,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
         num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
+        num_attention_heads=8,
+        num_key_value_heads=4,
         max_position_embeddings=64,
         use_cache=False,
     )
@@ -231,8 +235,8 @@ def run_tiny_model(device, backend, asymmetric, seed, warmup, iterations):
     model = LlamaForCausalLM(config).half().eval()
     add_actquant(model)
     quant_args = SimpleNamespace(
-        w_bits=4,
-        w_groupsize=32,
+        w_bits=fpint_config.weight_bits,
+        w_groupsize=fpint_config.group_size,
         w_asym=asymmetric,
         w_clip=False,
         int8_down_proj=False,
@@ -241,9 +245,9 @@ def run_tiny_model(device, backend, asymmetric, seed, warmup, iterations):
     rtn_fwrd(model, device, quant_args)
     selection_args = SimpleNamespace(
         linear_backend=backend,
-        fpint_mxu_rows=32,
-        fpint_extra_bits=19,
-        fpint_reduce_extra_bits=10,
+        fpint_mxu_rows=fpint_config.mxu_rows,
+        fpint_extra_bits=fpint_config.extra_bits,
+        fpint_reduce_extra_bits=fpint_config.reduce_extra_bits,
     )
     coverage = configure_fpint_linears(model, selection_args)
     model.to(device)
@@ -341,6 +345,7 @@ def main():
             args.seed,
             args.warmup,
             args.iterations,
+            config,
         )
     rendered = json.dumps(result, indent=2)
     print(rendered)

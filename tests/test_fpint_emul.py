@@ -83,6 +83,7 @@ def test_reference_and_torch_cover_bits_and_zero_points(bits, asymmetric):
         ((2, 0, 33), 5, 32, 16),
         ((2, 2, 65), 3, 64, 32),
         ((3, 47), 11, -1, 16),
+        ((2, 3, 257), 37, 128, 128),
     ],
 )
 def test_general_shapes_tails_and_independent_grouping(
@@ -284,6 +285,33 @@ def test_cuda_backend_honors_nondefault_current_stream():
         copied = actual.to("cpu", non_blocking=True)
     stream.synchronize()
     torch.testing.assert_close(copied, torch.from_numpy(expected), atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("asymmetric", [False, True])
+def test_cuda_mxu_row_128_matches_independent_reference(asymmetric):
+    case = _case(
+        shape=(2, 3, 257),
+        n=37,
+        bits=4,
+        group_size=128,
+        mxu_rows=128,
+        asymmetric=asymmetric,
+        seed=128 + asymmetric,
+    )
+    x, weight, scale, zero, config = case
+    expected = qcol_real_2scomp_reference(x, weight, scale, zero, config)
+    actual = fpint_linear(
+        torch.from_numpy(x).cuda(),
+        torch.from_numpy(weight).cuda(),
+        torch.from_numpy(scale).cuda(),
+        torch.from_numpy(zero).cuda(),
+        config,
+        backend="fpint_cuda",
+    )
+    torch.testing.assert_close(
+        actual.cpu(), torch.from_numpy(expected), atol=1e-3, rtol=1e-3
+    )
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="two CUDA GPUs are required")
@@ -684,6 +712,14 @@ def test_ptq_model_fpint_checkpoint_round_trip_and_forward(tmp_path):
     model = ptq_model(args, model)
     payload = torch.load(checkpoint, weights_only=False)
     assert payload["fpint_format_version"] == 1
+    assert payload["fpint_quantization"] == {
+        "weight_bits": 4,
+        "weight_group_size": 32,
+        "weight_symmetric": False,
+        "weight_clip": False,
+        "gptq": False,
+        "act_order": False,
+    }
     assert any(key.endswith("fpint_weight") for key in payload["model"])
 
     restored = LlamaForCausalLM(config).half().eval()

@@ -86,6 +86,26 @@ def ptq_model(args, model, model_args=None):
                 raise ValueError(
                     f"Unsupported FPINT checkpoint format version: {fpint_version}"
                 )
+            fpint_quantization = save_dict.get("fpint_quantization")
+            if fpint_quantization is not None:
+                expected = {
+                    "weight_bits": args.w_bits,
+                    "weight_group_size": args.w_groupsize,
+                    "weight_symmetric": not args.w_asym,
+                }
+                mismatches = {
+                    name: {
+                        "checkpoint": fpint_quantization.get(name),
+                        "requested": requested,
+                    }
+                    for name, requested in expected.items()
+                    if fpint_quantization.get(name) != requested
+                }
+                if mismatches:
+                    raise ValueError(
+                        "Quantized checkpoint configuration does not match the "
+                        f"requested FPINT weight configuration: {mismatches}"
+                    )
             model.load_state_dict(save_dict["model"])
 
         elif not args.w_rtn:  # GPTQ Weight Quantization
@@ -115,6 +135,14 @@ def ptq_model(args, model, model_args=None):
 
         if args.save_qmodel_path:
             save_dict["fpint_format_version"] = 1
+            save_dict["fpint_quantization"] = {
+                "weight_bits": args.w_bits,
+                "weight_group_size": args.w_groupsize,
+                "weight_symmetric": not args.w_asym,
+                "weight_clip": bool(args.w_clip),
+                "gptq": not bool(args.w_rtn),
+                "act_order": bool(getattr(args, "act_order", False)),
+            }
             save_dict["model"] = model.state_dict()
             if args.export_to_et:
                 save_dict = write_model_llama(

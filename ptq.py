@@ -28,6 +28,7 @@ from utils.quant_utils import find_qlayers, ActQuantWrapper
 from functools import partial
 import pickle
 import os
+import time
 
 torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 
@@ -49,9 +50,18 @@ def file_sha256(path):
 
 def quantization_metadata(model_args, training_args, ptq_args, model, task_names):
     rotation_source = ptq_args.optimized_rotation_path
+    checkpoint_path = ptq_args.load_qmodel_path or ptq_args.save_qmodel_path
+    checkpoint_sha256 = os.environ.get("SPINQUANT_CHECKPOINT_SHA256")
+    if checkpoint_sha256 is None:
+        checkpoint_sha256 = file_sha256(checkpoint_path)
     return {
         "model": model_args.input_model,
         "weight_bits": ptq_args.w_bits,
+        "weight_groupsize": ptq_args.w_groupsize,
+        "weight_symmetric": not ptq_args.w_asym,
+        "weight_clip": bool(ptq_args.w_clip),
+        "weight_quantizer": "RTN" if ptq_args.w_rtn else "GPTQ",
+        "weight_act_order": bool(ptq_args.act_order),
         "activation_bits": ptq_args.a_bits,
         "query_bits": ptq_args.q_bits,
         "probability_bits": ptq_args.p_bits,
@@ -77,6 +87,8 @@ def quantization_metadata(model_args, training_args, ptq_args, model, task_names
         "rotate": ptq_args.rotate,
         "rotation_checkpoint": rotation_source,
         "rotation_checkpoint_sha256": file_sha256(rotation_source),
+        "quantized_checkpoint": checkpoint_path,
+        "quantized_checkpoint_sha256": checkpoint_sha256,
         "eval_tasks": task_names,
         "num_fewshot": 0,
         "model_max_length": training_args.model_max_length,
@@ -88,7 +100,13 @@ def quantization_metadata(model_args, training_args, ptq_args, model, task_names
 # os.environ["LOCAL_RANK"] = str(FIRST_GPU_ID)
 
 def train() -> None:
-    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=8))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(
+        backend="nccl",
+        timeout=datetime.timedelta(hours=8),
+        device_id=torch.device("cuda", local_rank),
+    )
     model_args, training_args, ptq_args = process_args_ptq()
     task_names = [task.strip() for task in ptq_args.eval_tasks.split(",") if task.strip()]
     if not task_names:
@@ -156,6 +174,7 @@ def train() -> None:
     model.config.use_cache = False
 
     try:
+      evaluation_started = time.perf_counter()
       results = evaluator.simple_evaluate(
           model="hf",
           model_args={"pretrained" : model.to("cuda"),
@@ -171,17 +190,10 @@ def train() -> None:
       results["spinquant_quantization"] = quantization_metadata(
         model_args, training_args, ptq_args, model, task_names
       )
+      results["spinquant_quantization"]["evaluation_seconds"] = (
+        time.perf_counter() - evaluation_started
+      )
 
-      os.makedirs("./results", exist_ok=True)
-      if os.path.exists("./results/results.pkl"):
-        try:
-          with open("./results/results.pkl", "rb") as results_file:
-            resultlist = pickle.load(results_file)
-        except (EOFError, pickle.UnpicklingError, AttributeError, TypeError):
-          log.warning("Ignoring unreadable legacy results.pkl")
-          resultlist = []
-      else:
-        resultlist = []
       del results['config']['model_args']['pretrained']
 
       if ptq_args.results_path:
@@ -190,20 +202,30 @@ def train() -> None:
           os.makedirs(results_dir, exist_ok=True)
         with open(ptq_args.results_path, "w", encoding="utf-8") as results_file:
           json.dump(results, results_file, indent=2, ensure_ascii=False, default=str)
-
-      resultlist.append({
-          "model_args": model_args,
-          "training_args": training_args,
-          "ptq_args": ptq_args,
-          "results": results
-      })
-      try:
-        with open("./results/results.pkl", "wb") as results_file:
-          pickle.dump(resultlist, results_file)
-      except (pickle.PicklingError, TypeError, AttributeError) as pickle_error:
-        # lm-eval may include dynamically defined filter classes that cannot be
-        # serialized. The JSON result requested by the caller is authoritative.
-        log.warning("Skipping legacy results.pkl persistence: %s", pickle_error)
+      else:
+        # The legacy pickle is only retained for interactive runs without an
+        # explicit JSON result. Avoid a shared writer in parallel task shards.
+        os.makedirs("./results", exist_ok=True)
+        if os.path.exists("./results/results.pkl"):
+          try:
+            with open("./results/results.pkl", "rb") as results_file:
+              resultlist = pickle.load(results_file)
+          except (EOFError, pickle.UnpicklingError, AttributeError, TypeError):
+            log.warning("Ignoring unreadable legacy results.pkl")
+            resultlist = []
+        else:
+          resultlist = []
+        resultlist.append({
+            "model_args": model_args,
+            "training_args": training_args,
+            "ptq_args": ptq_args,
+            "results": results
+        })
+        try:
+          with open("./results/results.pkl", "wb") as results_file:
+            pickle.dump(resultlist, results_file)
+        except (pickle.PicklingError, TypeError, AttributeError) as pickle_error:
+          log.warning("Skipping legacy results.pkl persistence: %s", pickle_error)
     except Exception as e:
       print("Error in evaluation")
       print(e)
@@ -219,6 +241,7 @@ def train() -> None:
     # dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, ptq_args)
     # log.info("wiki2 ppl is: {}".format(dataset_ppl))
     dist.barrier()
+    dist.destroy_process_group()
 
 if __name__ == "__main__":
     train()

@@ -10,6 +10,8 @@ namespace {
 
 constexpr int kBlockN = 32;
 constexpr int kBlockM = 4;
+constexpr int kReductionLanes = 4;
+constexpr int kThreadsPerBlock = kBlockN * kBlockM * kReductionLanes;
 constexpr int kMantissaBits = 10;
 constexpr int kExponentBias = 15;
 
@@ -53,53 +55,65 @@ __global__ void fpint_qcol_kernel(
       shared_reduce + (has_zero ? kBlockM * mxu_rows : 0));
   __shared__ int maximum_exponents[kBlockM];
 
-  const int lane = threadIdx.x;
-  const int local_row = threadIdx.y;
+  const int thread = threadIdx.x;
+  const int output_index = thread / kReductionLanes;
+  const int reduction_lane = thread % kReductionLanes;
+  const int lane = output_index % kBlockN;
+  const int local_row = output_index / kBlockN;
   const int row = blockIdx.y * kBlockM + local_row;
   const int column = blockIdx.x * kBlockN + lane;
-  const int linear_thread = local_row * kBlockN + lane;
   float accumulator = 0.0f;
 
   const int tile_count = (k_columns + mxu_rows - 1) / mxu_rows;
   for (int tile = 0; tile < tile_count; ++tile) {
     const int tile_start = tile * mxu_rows;
-    int local_maximum = 1;
-    if (row < rows) {
-      for (int offset = lane; offset < mxu_rows; offset += kBlockN) {
-        const int k = tile_start + offset;
-        if (k < k_columns) {
-          int exponent = fp16_exponent(activation[row * k_columns + k]);
-          exponent = exponent == 0 ? 1 : exponent;
-          local_maximum = max(local_maximum, exponent);
+    if (thread < kBlockM * kBlockN) {
+      const int exponent_row = thread / kBlockN;
+      const int exponent_lane = thread % kBlockN;
+      const int global_row = blockIdx.y * kBlockM + exponent_row;
+      int local_maximum = 1;
+      if (global_row < rows) {
+        for (int offset = exponent_lane; offset < mxu_rows;
+             offset += kBlockN) {
+          const int k = tile_start + offset;
+          if (k < k_columns) {
+            int exponent =
+                fp16_exponent(activation[global_row * k_columns + k]);
+            exponent = exponent == 0 ? 1 : exponent;
+            local_maximum = max(local_maximum, exponent);
+          }
         }
       }
-    }
-    for (int offset = 16; offset > 0; offset >>= 1) {
-      local_maximum = max(
-          local_maximum,
-          __shfl_down_sync(0xffffffff, local_maximum, offset));
-    }
-    if (lane == 0) {
-      maximum_exponents[local_row] = local_maximum;
+      for (int offset = 16; offset > 0; offset >>= 1) {
+        local_maximum = max(
+            local_maximum,
+            __shfl_down_sync(0xffffffff, local_maximum, offset));
+      }
+      if (exponent_lane == 0) {
+        maximum_exponents[exponent_row] = local_maximum;
+      }
     }
     __syncthreads();
 
-    if (row < rows) {
-      for (int offset = lane; offset < mxu_rows; offset += kBlockN) {
-        const int k = tile_start + offset;
-        const __half value =
-            k < k_columns ? activation[row * k_columns + k]
-                          : __float2half(0.0f);
-        shared_main[local_row * mxu_rows + offset] =
-            align_fp16(value, maximum_exponents[local_row], extra_bits);
-        if (has_zero) {
-          shared_reduce[local_row * mxu_rows + offset] = align_fp16(
-              value, maximum_exponents[local_row], reduce_extra_bits);
-        }
+    for (int index = thread; index < kBlockM * mxu_rows;
+         index += kThreadsPerBlock) {
+      const int activation_row = index / mxu_rows;
+      const int offset = index - activation_row * mxu_rows;
+      const int global_row = blockIdx.y * kBlockM + activation_row;
+      const int k = tile_start + offset;
+      const __half value =
+          (global_row < rows && k < k_columns)
+          ? activation[global_row * k_columns + k]
+          : __float2half(0.0f);
+      shared_main[index] =
+          align_fp16(value, maximum_exponents[activation_row], extra_bits);
+      if (has_zero) {
+        shared_reduce[index] = align_fp16(
+            value, maximum_exponents[activation_row], reduce_extra_bits);
       }
     }
-    for (int index = linear_thread; index < kBlockN * mxu_rows;
-         index += kBlockN * kBlockM) {
+    for (int index = thread; index < kBlockN * mxu_rows;
+         index += kThreadsPerBlock) {
       const int local_column = index / mxu_rows;
       const int offset = index - local_column * mxu_rows;
       const int global_column = blockIdx.x * kBlockN + local_column;
@@ -114,34 +128,49 @@ __global__ void fpint_qcol_kernel(
     if (row < rows && column < n_columns) {
       int64_t inner = 0;
       int64_t reduction = 0;
-      for (int offset = 0; offset < mxu_rows; ++offset) {
-        inner += shared_main[local_row * mxu_rows + offset] *
-            static_cast<int64_t>(shared_weight[lane * mxu_rows + offset]);
-        if (has_zero) {
-          reduction += shared_reduce[local_row * mxu_rows + offset];
+      for (int offset = reduction_lane; offset < mxu_rows;
+           offset += kReductionLanes) {
+        const int k = tile_start + offset;
+        if (k < k_columns) {
+          inner += shared_main[local_row * mxu_rows + offset] *
+              static_cast<int64_t>(
+                  shared_weight[lane * mxu_rows + offset]);
+          if (has_zero) {
+            reduction += shared_reduce[local_row * mxu_rows + offset];
+          }
         }
       }
-      const int group = group_size == -1 ? 0 : tile_start / group_size;
-      int64_t post = inner;
-      if (has_zero) {
-        const int64_t zero_value = zero[column * group_count + group];
-        post -= zero_value * reduction *
-            (int64_t{1} << (extra_bits - reduce_extra_bits));
+      const unsigned subgroup_mask =
+          ((1u << kReductionLanes) - 1u) <<
+          (((thread & 31) / kReductionLanes) * kReductionLanes);
+      for (int offset = kReductionLanes / 2; offset > 0; offset >>= 1) {
+        inner += __shfl_down_sync(
+            subgroup_mask, inner, offset, kReductionLanes);
+        reduction += __shfl_down_sync(
+            subgroup_mask, reduction, offset, kReductionLanes);
       }
-      // Intrinsics make the two specified FP32 operations explicit and avoid
-      // silently fusing the scale multiply with the K-ordered accumulation.
-      const int binary_exponent = maximum_exponents[local_row] -
-          kExponentBias - kMantissaBits - extra_bits;
-      float contribution = __fmul_rn(
-          static_cast<float>(post), ldexpf(1.0f, binary_exponent));
-      contribution = __fmul_rn(
-          contribution, __half2float(scale[column * group_count + group]));
-      accumulator = __fadd_rn(accumulator, contribution);
+      if (reduction_lane == 0) {
+        const int group = group_size == -1 ? 0 : tile_start / group_size;
+        int64_t post = inner;
+        if (has_zero) {
+          const int64_t zero_value = zero[column * group_count + group];
+          post -= zero_value * reduction *
+              (int64_t{1} << (extra_bits - reduce_extra_bits));
+        }
+        // Preserve the original FP32 scale and K-tile accumulation order.
+        const int binary_exponent = maximum_exponents[local_row] -
+            kExponentBias - kMantissaBits - extra_bits;
+        float contribution = __fmul_rn(
+            static_cast<float>(post), ldexpf(1.0f, binary_exponent));
+        contribution = __fmul_rn(
+            contribution, __half2float(scale[column * group_count + group]));
+        accumulator = __fadd_rn(accumulator, contribution);
+      }
     }
     __syncthreads();
   }
 
-  if (row < rows && column < n_columns) {
+  if (reduction_lane == 0 && row < rows && column < n_columns) {
     output[row * n_columns + column] = __float2half_rn(accumulator);
   }
 }
@@ -190,7 +219,7 @@ torch::Tensor fpint_qcol_cuda(
   if (rows == 0 || n == 0) {
     return output;
   }
-  const dim3 block(kBlockN, kBlockM);
+  const dim3 block(kThreadsPerBlock);
   const dim3 grid((n + kBlockN - 1) / kBlockN,
                   (rows + kBlockM - 1) / kBlockM);
   const size_t aligned_arrays = has_zero ? 2 : 1;
