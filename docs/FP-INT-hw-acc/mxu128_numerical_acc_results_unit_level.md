@@ -1,62 +1,73 @@
-# MXU ROW 128 QCOL unit-level numerical accuracy
+# MXU ROW 128 FP×INT unit-level numerical accuracy
 
-## 설정
+## 실험 정의
 
-- 연산: `QCOL_REAL_2SCOMP`
-- Activation: FP16
-- Weight: signed INT4
-- Weight group size: 128
-- MXU reduction row: 128
-- Main / reduction extra bits: 19 / 10
-- Output: FP16
-- 비교 기준: 독립 NumPy reference
-- 실행 환경: NVIDIA RTX PRO 6000 Blackwell Server Edition,
-  PyTorch 2.7.0+cu128, CUDA 12.8
+동일한 FP16 activation과 signed INT4 weight로 세 경로를 계산했다.
 
-## Random sweep
+1. `FP64_ref`: activation과 weight를 FP64로 승격한 GPU Linear
+2. `Conventional`: INT4 weight만 FP16으로 cast한 실제 GPU FP16 Linear
+3. `FPINT`: `QCOL_REAL_2SCOMP` CUDA hardware emulation
 
-다음 축의 Cartesian product를 30개 seed로 실행했다.
+`Conventional_err = Conventional - FP64_ref`,
+`FP_INT_err = FPINT - FP64_ref`로 정의했다. MXU row 128과 main/reduction
+extra bits 19/10은 FPINT 경로에만 적용된다. Conventional은 Berlin1
+PyTorch의 default Tensor Core 설정
+`allow_fp16_reduced_precision_reduction=True`를 사용했다.
 
-- Input distribution: Gaussian, FP16 sign/exponent/mantissa componentwise sampling
-- Weight zero: symmetric, asymmetric
-- K: `127, 128, 129, 255, 256, 257, 1024, 4096, 14336`
-- M / N: 4 / 37
-- Seed: 20260915부터 case마다 1씩 증가
-- All-close diagnostic: `atol=rtol=0.001`
+## Input
 
-총 1,080개 input case이며, 각 case에서 Torch backend와 CUDA backend를
-독립 reference에 각각 비교했다.
+- M=N=32, K=`128..32768` power-of-two, K당 30 trials
+- Activation sign/exponent/mantissa field를 독립 uniform sampling
+- Sign bit `0..1`, mantissa `0..1023`
+- Weight는 signed INT4 `-8..7` uniform sampling
+- Scale=1, zero-point=0
+
+각 K에서 common finite output을 99.9% 이상 확보하도록 exponent field
+상한을 다음과 같이 조정했다.
+
+| K | 128 | 256 | 512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| EXP max | 24 | 24 | 24 | 23 | 23 | 22 | 21 | 21 | 20 |
+
+Activation sign bit는 양수 31,396,120개, 음수 31,395,560개였다.
+
+## Metric
+
+- RMSE는 candidate FP16 output을 FP64로 올려 unrounded FP64 reference와 비교했다.
+- ULP는 FP64 reference를 correctly-rounded FP16으로 변환한 값과 candidate
+  FP16 bit pattern 사이의 exact representable-value distance다.
+- FP64 reference, FP16-rounded reference, Conventional, FPINT가 모두 finite인
+  common mask를 두 error에 동일하게 적용했다.
+- 표의 `mean ± std`는 30개 trial metric의 mean과 sample std(`ddof=1`)다.
+- 원소별 signed error와 ULP의 population std도 raw JSON과
+  [상세 결과](../../agent-tasks/fp-int-emul/MXU128_EXPERIMENT_RESULTS.md)에 기록했다.
 
 ## 결과
 
-| 비교 | 통과 / 전체 | Maximum absolute error |
-| --- | ---: | ---: |
-| FPINT Torch vs NumPy reference | 1,080 / 1,080 | 0 |
-| FPINT CUDA vs NumPy reference | 1,080 / 1,080 | 0 |
-| FPINT CUDA vs standard QDQ | 540 / 1,080 | 4 |
+| K | Common finite | Conv RMSE mean ± std | FPINT RMSE mean ± std | FPINT/Conv RMSE | Conv mean ULP ± std | FPINT mean ULP ± std |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 1 | 1.9790936 ± 0.0947782 | 1.9790927 ± 0.0947783 | 0.9999995 | 0.00149740 ± 0.00238841 | 0.00006510 ± 0.00024776 |
+| 256 | 1 | 2.7551951 ± 0.1409866 | 2.7551887 ± 0.1409841 | 0.9999977 | 0.00257161 ± 0.00284984 | 0.00032552 ± 0.00059226 |
+| 512 | 0.9994141 | 3.8980988 ± 0.1140638 | 3.8980837 ± 0.1140655 | 0.9999961 | 0.00332241 ± 0.00193177 | 0.00026054 ± 0.00056990 |
+| 1024 | 1 | 2.8276444 ± 0.1081050 | 2.8276063 ± 0.1081131 | 0.9999865 | 0.00712891 ± 0.00479206 | 0.00039063 ± 0.00070701 |
+| 2048 | 0.9992839 | 5.6687153 ± 0.1591597 | 3.9984284 ± 0.1579884 | 0.7053500 | 4.064229 ± 8.051941 | 0.00048854 ± 0.00135121 |
+| 4096 | 1 | 4.0961378 ± 0.1120170 | 2.8974354 ± 0.1077941 | 0.7073579 | 2.525716 ± 5.232312 | 0.00048828 ± 0.00061496 |
+| 8192 | 1 | 2.9696318 ± 0.0793433 | 2.0692133 ± 0.0691083 | 0.6967912 | 3.297656 ± 6.375443 | 0.00097656 ± 0.00214568 |
+| 16384 | 1 | 4.1807329 ± 0.1238503 | 2.9814538 ± 0.1108139 | 0.7131414 | 5.772949 ± 10.092003 | 0.00231120 ± 0.00367624 |
+| 32768 | 1 | 3.0172404 ± 0.0796185 | 2.1298918 ± 0.0537904 | 0.7059072 | 2.934701 ± 5.552041 | 0.00240885 ± 0.00253535 |
 
-Reference 비교 2,160회는 FP16 output이 모두 정확히 일치했다. CUDA kernel은
-K가 MXU row 또는 quantization group 경계에 맞지 않는 tail, 큰 K, symmetric와
-asymmetric zero, 넓은 FP16 exponent 분포를 모두 처리했다.
+K≤1024에서는 두 경로의 RMSE가 거의 같았다. K≥2048에서 FPINT RMSE는
+Conventional의 약 69.7–71.3%였다. FPINT mean ULP는 모든 K에서 Conventional보다
+작았다. 이 비교는 Conventional의 Blackwell default reduced-precision reduction을
+포함하므로 다른 GPU accumulation 설정으로 일반화하면 안 된다.
 
-Standard QDQ와의 차이는 오류가 아니다. Standard는 FP16 dequantized weight로
-일반 GPU Linear를 실행하는 반면 FPINT는 activation exponent alignment, integer
-dot product, tile별 scale 및 FP32 순차 accumulation을 수행한다. 따라서 두 연산의
-FP16 rounding 경로가 다르다.
-
-## 결론
-
-- Torch와 CUDA 구현 모두 의도한 `QCOL_REAL_2SCOMP` reference와 일치한다.
-- MXU row 128과 weight group 128이 정렬된 주 실험 조건뿐 아니라 K tail도 통과한다.
-- Standard QDQ와의 all-close는 FPINT correctness gate로 사용할 수 없다.
-- 실제 model-level 영향은
-  [model-level 결과](mxu128_numerical_acc_results_model_level.md)에서 PPL과
-  downstream accuracy로 평가한다.
+FPINT Torch/CUDA는 독립 QCOL reference all-close를 각각 270/270 case에서
+통과했다.
 
 ## 결과 파일
 
 - 측정 script: `measure_fpint_qcol_accuracy.py`
 - Raw JSON:
-  `/mnt/nfs-vlsi/jaeyongjang/results/fpint-mxu128-llama31-8b/random-qcol.json`
+  `/mnt/nfs-vlsi/jaeyongjang/results/fpint-mxu128-llama31-8b/random-qcol-fp64-errors.json`
 - Raw CSV:
-  `/mnt/nfs-vlsi/jaeyongjang/results/fpint-mxu128-llama31-8b/random-qcol.csv`
+  `/mnt/nfs-vlsi/jaeyongjang/results/fpint-mxu128-llama31-8b/random-qcol-fp64-errors.csv`

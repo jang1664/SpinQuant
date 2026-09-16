@@ -17,7 +17,7 @@ MASTER_PORT_BASE=${MASTER_PORT_BASE:-29610}
 RANDOM_TRIALS=${RANDOM_TRIALS:-30}
 SEED=${SEED:-0}
 
-RANDOM_RESULT="${OUTPUT_ROOT}/random-qcol.json"
+RANDOM_RESULT="${OUTPUT_ROOT}/random-qcol-fp64-errors.json"
 SMOKE_RESULT="${OUTPUT_ROOT}/standard-smoke.json"
 PAIRED_SMOKE_RESULT="${OUTPUT_ROOT}/paired-smoke-sanity.json"
 FULL_RESULT_DIR="${OUTPUT_ROOT}/full-shards"
@@ -54,12 +54,64 @@ echo "Output: ${OUTPUT_ROOT}"
 echo "Task GPUs: ${GPU_IDS[*]:0:4}"
 nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader
 
-if [[ ! -s "${RANDOM_RESULT}" ]]; then
+FPINT_KERNEL_SHA256=$(sha256sum fpint_emul/csrc/fpint_cuda_kernel.cu | awk '{print $1}')
+if ! "${PYTHON_BIN}" - "${RANDOM_RESULT}" "${FPINT_KERNEL_SHA256}" "${RANDOM_TRIALS}" <<'PY'
+import json
+import sys
+
+path, kernel_sha, trials = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as handle:
+        result = json.load(handle)
+except (FileNotFoundError, json.JSONDecodeError):
+    raise SystemExit(1)
+config = result.get("config", {})
+valid = (
+    result.get("status") == "pass"
+    and result.get("evaluation_policy", {}).get("fp64_gpu_ground_truth") is True
+    and result.get("evaluation_policy", {}).get(
+        "common_finite_mask_for_paired_errors"
+    ) is True
+    and result.get("evaluation_policy", {}).get(
+        "qcol_reference_must_be_allclose"
+    ) is True
+    and config.get("sampler_version") == "k_scaled_finite_fp16_fields_v3"
+    and config.get("operation") == "raw_fp16_times_signed_int"
+    and config.get("m") == 32
+    and config.get("n") == 32
+    and config.get("trials") == int(trials)
+    and config.get("k_values")
+    == [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+    and config.get("fp16_fields", {}).get("sign") == [0, 1]
+    and config.get("fp16_fields", {}).get("exponent_min") == 0
+    and config.get("fp16_fields", {}).get("exponent_max_by_k")
+    == {
+        "128": 24,
+        "256": 24,
+        "512": 24,
+        "1024": 23,
+        "2048": 23,
+        "4096": 22,
+        "8192": 21,
+        "16384": 21,
+        "32768": 20,
+    }
+    and config.get("fp16_fields", {}).get("mantissa") == [0, 1023]
+    and config.get("integer_range") == [-8, 7]
+    and config.get("finite_target") == 0.999
+    and "conventional_err" in result.get("summary", {}).get("overall", {})
+    and "fp_int_err" in result.get("summary", {}).get("overall", {})
+    and result.get("environment", {}).get("fpint_cuda_kernel_sha256")
+    == kernel_sha
+)
+raise SystemExit(0 if valid else 1)
+PY
+then
     CUDA_VISIBLE_DEVICES="${GPU_IDS[0]}" "${PYTHON_BIN}" measure_fpint_qcol_accuracy.py \
         --bits 4 --group-size 128 --mxu-rows 128 \
         --trials "${RANDOM_TRIALS}" --device cuda:0 \
         --output "${RANDOM_RESULT}" \
-        2>&1 | tee "${LOG_ROOT}/random-qcol.log"
+        2>&1 | tee "${LOG_ROOT}/random-qcol-fp64-errors.log"
 fi
 
 COMMON_ARGS=(
@@ -152,7 +204,6 @@ else
     run_ptq standard-smoke standard wikitext "${SMOKE_RESULT}" 4 save "${GPU_IDS[0]}" "${MASTER_PORT_BASE}" 1
 fi
 
-FPINT_KERNEL_SHA256=$(sha256sum fpint_emul/csrc/fpint_cuda_kernel.cu | awk '{print $1}')
 if ! "${PYTHON_BIN}" - "${PAIRED_SMOKE_RESULT}" "${FPINT_KERNEL_SHA256}" <<'PY'
 import json
 import sys
@@ -199,7 +250,6 @@ PY
 then
     "${PYTHON_BIN}" summarize_fpint_mxu128.py \
         --random "${RANDOM_RESULT}" \
-        --smoke "${PAIRED_SMOKE_RESULT}" \
         --output agent-tasks/fp-int-emul/MXU128_EXPERIMENT_RESULTS.md
     echo "Stopping before full workload: paired sanity gate failed." >&2
     exit 1
@@ -251,7 +301,6 @@ fi
 
 "${PYTHON_BIN}" summarize_fpint_mxu128.py \
     --random "${RANDOM_RESULT}" \
-    --smoke "${PAIRED_SMOKE_RESULT}" \
     --standard-results "${STANDARD_RESULTS[@]}" \
     --fpint-results "${FPINT_RESULTS[@]}" \
     --metrics-output "${FULL_METRICS_RESULT}" \

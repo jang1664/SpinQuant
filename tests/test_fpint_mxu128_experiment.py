@@ -3,14 +3,29 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import numpy as np
 import torch
 
+from fpint_emul import FpIntConfig
 from measure_fpint_backend_accuracy import (
     PairedLinearObserver,
     TensorErrorAccumulator,
     evaluate_sanity,
 )
-from measure_fpint_qcol_accuracy import run
+from measure_fpint_qcol_accuracy import (
+    activation_field_stats,
+    conventional_linear,
+    fp16_ulp_distance,
+    fp64_reference_linear,
+    make_case,
+    paired_error_metrics,
+    parse_args,
+    parse_exponent_max_map,
+    qcol_allclose_metrics,
+    run,
+    sample_finite_fp16_fields,
+    summarize_records,
+)
 from summarize_fpint_mxu128 import TASK_METRICS, aggregate_full_results, render_report
 
 
@@ -21,22 +36,165 @@ def test_random_qcol_experiment_smoke_cpu():
         mxu_rows=128,
         extra_bits=19,
         reduce_extra_bits=10,
-        m=2,
-        n=5,
-        k_values=(127, 128, 129),
+        m=32,
+        n=32,
+        k_values=(128,),
+        exponent_max_by_k={128: 15},
+        finite_target=1.0,
         trials=1,
         base_seed=7,
-        distributions=("gaussian", "componentwise"),
-        zero_modes=("symmetric", "asymmetric"),
         atol=1e-3,
         rtol=1e-3,
         device="cpu",
     )
     result = run(args)
     assert result["status"] == "pass"
-    assert len(result["records"]) == 12
+    assert len(result["records"]) == 1
+    row = result["summary"]["by_k"]["128"]
+    assert row["coverage"]["common_finite_fraction"] == 1.0
+    assert row["conventional_err"]["global_rmse"] is not None
+    assert row["fp_int_err"]["global_mean_ulp"] is not None
     for record in result["records"]:
-        assert record["comparisons"]["fpint_torch_vs_reference"]["allclose"]
+        assert record["comparisons"]["fpint_torch_vs_qcol_reference"]["allclose"]
+
+
+def test_raw_fp16_sampler_uses_all_finite_fields_uniformly():
+    values = sample_finite_fp16_fields(
+        np.random.default_rng(0), (200_000,), exponent_max=24
+    )
+    bits = values.view(np.uint16)
+    sign = bits >> 15
+    exponent = (bits >> 10) & 0x1F
+    mantissa = bits & 0x3FF
+    assert (int(sign.min()), int(sign.max())) == (0, 1)
+    assert (int(exponent.min()), int(exponent.max())) == (0, 24)
+    assert (int(mantissa.min()), int(mantissa.max())) == (0, 1023)
+    assert np.isfinite(values).all()
+
+
+def test_raw_fpxint_case_uses_full_int4_and_identity_qparams():
+    config = FpIntConfig(4, group_size=128, mxu_rows=128)
+    activation, weight, scale, zero = make_case(
+        m=32, k=32768, n=32, config=config, seed=11, exponent_max=20
+    )
+    assert activation.shape == (32, 32768)
+    assert weight.shape == (32, 32768)
+    assert (int(weight.min()), int(weight.max())) == (-8, 7)
+    assert scale.shape == (32, 256)
+    assert np.all(scale == 1)
+    assert np.all(zero == 0)
+    stats = activation_field_stats(activation)
+    assert stats["positive_sign_bits"] > 0
+    assert stats["negative_sign_bits"] > 0
+
+
+def test_exponent_map_parser():
+    assert parse_exponent_max_map("128:25,256:24") == {128: 25, 256: 24}
+    with pytest.raises(argparse.ArgumentTypeError):
+        parse_exponent_max_map("128:31")
+
+
+def test_cli_exponent_map_uses_internal_field_name(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "measure_fpint_qcol_accuracy.py",
+            "--k-values",
+            "128",
+            "--exp-max-by-k",
+            "128:25",
+            "--output",
+            str(tmp_path / "result.json"),
+        ],
+    )
+    args = parse_args()
+    assert args.exponent_max_by_k == {128: 25}
+
+
+def test_paired_errors_use_one_common_finite_mask():
+    reference = torch.tensor([1.0003, 2.0, 3.0, 4.0], dtype=torch.float64)
+    conventional = torch.tensor([1.0, float("nan"), 3.0, float("inf")])
+    fp_int = torch.tensor([1.0, 2.0, float("inf"), 4.0])
+    result = paired_error_metrics(conventional, fp_int, reference)
+    coverage = result["coverage"]
+    assert coverage["common_finite_elements"] == 1
+    assert coverage["conventional_nonfinite"] == 2
+    assert coverage["fp_int_nonfinite"] == 1
+    assert result["conventional_err"]["elements"] == 1
+    assert result["fp_int_err"]["elements"] == 1
+    assert result["conventional_err"]["rmse"] == pytest.approx(0.0003)
+
+
+def test_paired_errors_exclude_fp64_values_that_overflow_rounded_fp16():
+    reference = torch.tensor([70_000.0], dtype=torch.float64)
+    finite_candidate = torch.tensor([64_000.0], dtype=torch.float16)
+    result = paired_error_metrics(finite_candidate, finite_candidate, reference)
+    assert result["coverage"]["fp16_rounded_reference_nonfinite"] == 1
+    assert result["coverage"]["common_finite_elements"] == 0
+    assert result["conventional_err"]["rmse"] is None
+
+
+def test_fp16_ulp_distance_handles_zero_subnormal_and_sign_crossing():
+    zero = torch.tensor([0x0000], dtype=torch.int16).view(torch.float16)
+    negative_zero = torch.tensor([-32768], dtype=torch.int16).view(torch.float16)
+    min_subnormal = torch.tensor([0x0001], dtype=torch.int16).view(torch.float16)
+    negative_min_subnormal = torch.tensor([-32767], dtype=torch.int16).view(
+        torch.float16
+    )
+    assert fp16_ulp_distance(zero, negative_zero).item() == 0
+    assert fp16_ulp_distance(zero, min_subnormal).item() == 1
+    assert fp16_ulp_distance(negative_min_subnormal, min_subnormal).item() == 2
+
+
+def test_fp64_and_conventional_paths_do_not_accept_mxu_configuration():
+    activation = torch.tensor([[1.0, 2.0]], dtype=torch.float16)
+    weight = torch.tensor([[3, -1]], dtype=torch.int8)
+    assert conventional_linear(activation, weight).item() == 1.0
+    assert fp64_reference_linear(activation, weight).item() == 1.0
+
+
+def test_k_summary_reports_element_and_trial_standard_deviations():
+    reference = torch.zeros(2, dtype=torch.float64)
+    records = []
+    for trial, (conv_value, fp_int_value) in enumerate(((1.0, 2.0), (3.0, 4.0))):
+        numerical = paired_error_metrics(
+            torch.tensor([conv_value, -conv_value], dtype=torch.float16),
+            torch.tensor([fp_int_value, -fp_int_value], dtype=torch.float16),
+            reference,
+        )
+        records.append(
+            {
+                "trial": trial,
+                "k": 128,
+                "input_stats": {"positive_sign_bits": 1, "negative_sign_bits": 1},
+                "coverage": numerical["coverage"],
+                "comparisons": {
+                    "fpint_torch_vs_qcol_reference": {"allclose": True},
+                    "conventional_err": numerical["conventional_err"],
+                    "fp_int_err": numerical["fp_int_err"],
+                },
+            }
+        )
+    row = summarize_records(records, finite_target=1.0)["by_k"]["128"]
+    assert row["conventional_err"]["trial_rmse_mean"] == pytest.approx(2.0)
+    assert row["conventional_err"]["trial_rmse_sample_std"] == pytest.approx(
+        2**0.5
+    )
+    assert row["conventional_err"]["global_signed_error_std"] == pytest.approx(
+        5**0.5
+    )
+    assert row["comparison"]["trial_rmse_mean"] == {
+        "delta_fp_int_minus_conventional": pytest.approx(1.0),
+        "ratio_fp_int_over_conventional": pytest.approx(1.5),
+    }
+
+
+def test_qcol_allclose_metrics_handles_tolerance_and_infinities():
+    expected = torch.tensor([float("inf"), -float("inf"), 1.0], dtype=torch.float16)
+    actual = torch.tensor([float("inf"), -float("inf"), 1.0005])
+    result = qcol_allclose_metrics(actual, expected, 1e-3, 1e-3)
+    assert result["allclose"]
+    assert result["reference_nonfinite"] == 2
 
 
 def test_tensor_error_accumulator_tracks_allclose_failures():
@@ -173,58 +331,82 @@ def test_full_result_aggregation_rejects_checkpoint_mismatch():
         aggregate_full_results(standard, fpint)
 
 
-def test_partial_report_marks_full_workload_as_pending():
-    metrics = {
-        "allclose": False,
-        "atol": 1e-3,
-        "rtol": 1e-3,
-        "elements": 2,
-        "outside_tolerance": 1,
-        "outside_tolerance_fraction": 0.5,
-        "nonfinite": 0,
-        "mae": 0.01,
-        "rmse": 0.02,
-        "relative_l2_error": 0.03,
-        "max_abs_error": 0.04,
-        "cosine_similarity": 0.99,
+def test_report_contains_only_random_fpxint_results():
+    error = {
+        "elements": 1024,
+        "global_rmse": 0.5,
+        "global_signed_error_mean": 0.1,
+        "global_signed_error_std": 0.49,
+        "global_mean_ulp": 1.5,
+        "global_std_ulp": 0.75,
+        "global_max_ulp": 4,
+        "trials_with_metrics": 1,
+        "trial_rmse_mean": 0.5,
+        "trial_rmse_sample_std": 0.0,
+        "trial_mean_ulp_mean": 1.5,
+        "trial_mean_ulp_sample_std": 0.0,
+        "trial_p50_ulp_mean": 1.0,
+        "trial_p95_ulp_mean": 3.0,
+    }
+    summary = {
+        "cases": 1,
+        "coverage": {
+            "output_elements": 1024,
+            "fp64_reference_nonfinite": 0,
+            "fp16_rounded_reference_nonfinite": 1,
+            "conventional_nonfinite": 1,
+            "fp_int_nonfinite": 0,
+            "common_finite_elements": 1023,
+            "common_finite_fraction": 1023 / 1024,
+        },
+        "finite_target_met": True,
+        "activation_sign_bits": {"positive": 2048, "negative": 2048},
+        "qcol_correctness": {
+            "torch_allclose_cases": 1,
+            "cuda_cases": 1,
+            "cuda_allclose_cases": 1,
+        },
+        "conventional_err": error,
+        "fp_int_err": error,
+        "comparison": {
+            "trial_rmse_mean": {
+                "delta_fp_int_minus_conventional": 0.0,
+                "ratio_fp_int_over_conventional": 1.0,
+            },
+            "trial_mean_ulp_mean": {
+                "delta_fp_int_minus_conventional": 0.0,
+                "ratio_fp_int_over_conventional": 1.0,
+            },
+        },
     }
     random = {
         "status": "pass",
-        "records": [
-            {
-                "comparisons": {
-                    "fpint_torch_vs_reference": {"allclose": True, "max_abs": 0.0},
-                    "fpint_vs_standard_qdq": {"allclose": False, "max_abs": 0.1},
-                }
-            }
-        ],
-    }
-    smoke = {
-        "status": "fail",
-        "evaluation_policy": {"name": "sanity_v1"},
-        "scope": {"documents": 1, "tokens": 2},
-        "linear_outputs": {
-            "aggregate": metrics,
-            "per_layer": {"model.layers.0.mlp.down_proj": metrics},
-            "failed_layers": ["model.layers.0.mlp.down_proj"],
+        "environment": {
+            "fpint_cuda_kernel_sha256": "abc",
+            "allow_fp16_reduced_precision_reduction": True,
         },
-        "logits": {
-            "allclose_metrics": metrics,
-            "distribution_metrics": {
-                "symmetric_kl_nats": 0.01,
-                "js_divergence_nats": 0.001,
-                "top1_agreement": 1.0,
-                "fp_perplexity": 10.0,
-                "quant_perplexity": 10.1,
+        "config": {
+            "m": 32,
+            "n": 32,
+            "k_values": [128],
+            "trials": 1,
+            "finite_target": 0.999,
+            "weight_bits": 4,
+            "mxu_rows": 128,
+            "group_size": 128,
+            "integer_range": [-8, 7],
+            "fp16_fields": {
+                "sign": [0, 1],
+                "exponent_min": 0,
+                "exponent_max_by_k": {"128": 24},
+                "mantissa": [0, 1023],
             },
         },
-        "timing": {
-            "standard_tokens_per_second": 100.0,
-            "fpint_cuda_tokens_per_second": 10.0,
-        },
-        "conditions": {"quantized_checkpoint_sha256": "abc"},
+        "summary": {"overall": summary, "by_k": {"128": summary}},
     }
-    report = render_report(random, smoke)
-    assert "아직 실행 결과가 없다" in report
-    assert "All-close는 diagnostic" in report
-    assert "model.layers.0.mlp.down_proj" in report
+    report = render_report(random)
+    assert "FP64-reference FP×INT" in report
+    assert "Conventional RMSE" in report
+    assert "FPINT mean ULP" in report
+    for forbidden in ("Llama", "Smoke", "WikiText", "HellaSwag", "perplexity"):
+        assert forbidden not in report

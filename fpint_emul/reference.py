@@ -161,7 +161,10 @@ def qcol_real_2scomp_reference(
         )
         accumulator = np.add(accumulator, scaled, dtype=np.float32)
 
-    output = accumulator.astype(np.float16)
+    # Full-range FP16 tests intentionally allow finite accumulators to overflow
+    # at the FP16 output cast; callers account for the resulting infinities.
+    with np.errstate(over="ignore", invalid="ignore"):
+        output = accumulator.astype(np.float16)
     if bias is not None:
         output = np.add(output, bias, dtype=np.float16)
     return output.reshape(*original_shape, n)

@@ -195,142 +195,120 @@ def aggregate_full_results(
     }
 
 
-def render_report(
-    random: dict[str, Any],
-    smoke: dict[str, Any],
-    full: dict[str, Any] | None = None,
-) -> str:
-    random_reference = [
-        metrics
-        for record in random["records"]
-        for name, metrics in record["comparisons"].items()
-        if name.endswith("vs_reference")
-    ]
-    random_qdq = [
-        record["comparisons"]["fpint_vs_standard_qdq"]
-        for record in random["records"]
-    ]
-    linear = smoke["linear_outputs"]["aggregate"]
-    smoke_logits = smoke["logits"]["allclose_metrics"]
-    smoke_distribution = smoke["logits"]["distribution_metrics"]
-    failed_layers = smoke["linear_outputs"]["failed_layers"]
-    per_layer = smoke["linear_outputs"]["per_layer"]
-    worst_layers = sorted(
-        per_layer.items(),
-        key=lambda item: item[1]["relative_l2_error"],
-        reverse=True,
-    )[:5]
+def render_report(random: dict[str, Any]) -> str:
+    """Render the paired FP64-reference numerical experiment."""
+
+    config = random["config"]
+    summary = random["summary"]
+    overall = summary["overall"]
+    fields = config["fp16_fields"]
+    exp_by_k = fields["exponent_max_by_k"]
     lines = [
-        "# MXU ROW 128 QCOL / Llama 3.1 8B 실험 결과",
+        "# MXU ROW 128 FP64-reference FP×INT 오차 비교",
         "",
         "## 설정",
         "",
-        "- QCOL_REAL_2SCOMP, INT4, weight group size 128, MXU ROW 128",
-        "- Llama 3.1 8B W4 GPTQ symmetric, A/Q/K/V/P FP16",
-        "- Reference backend: standard QDQ Linear",
-        "- Candidate backend: FPINT CUDA",
-        "",
-        "## Random QCOL",
-        "",
         f"- 상태: `{random['status']}`",
-        f"- Reference 비교 수: {len(random_reference)}",
-        f"- 실패 수: {sum(not row['allclose'] for row in random_reference)}",
-        f"- 최대 절대 오차: {number(max(row['max_abs'] for row in random_reference))}",
-        f"- Standard QDQ all-close: {sum(row['allclose'] for row in random_qdq)}/{len(random_qdq)} "
-        f"(최대 절대 오차 {number(max(row['max_abs'] for row in random_qdq))})",
+        f"- Shape: M={config['m']}, N={config['n']}",
+        f"- K: {', '.join(str(value) for value in config['k_values'])}",
+        f"- Trials: {config['trials']}",
+        f"- Finite target per K: {number(config['finite_target'])}",
+        f"- FP16 raw field uniform sampling: sign {fields['sign']}, "
+        f"exponent min {fields['exponent_min']}, mantissa {fields['mantissa']}",
+        f"- Signed INT{config['weight_bits']} uniform sampling: {config['integer_range']}",
+        "- Scale=1, zero-point=0 (raw FP×INT)",
+        f"- MXU row / group size: {config['mxu_rows']} / {config['group_size']}",
+        "- FP64 reference: FP64 activation × FP64-cast integer weight on GPU",
+        "- Conventional: FP16 activation × FP16-cast integer weight on GPU",
+        "- FPINT: QCOL_REAL_2SCOMP CUDA emulation",
+        "- RMSE는 unrounded FP64 reference, ULP는 correctly-rounded FP16 reference 기준",
+        "- 세 output이 모두 finite인 common mask에서 두 error를 paired 비교",
         "",
-        "## 실제 Linear smoke",
+        "## Finite coverage",
         "",
-        f"- 상태: `{smoke['status']}` (`{smoke['evaluation_policy']['name']}`)",
-        "- All-close는 diagnostic이며 smoke gate에 사용하지 않음",
-        f"- 관측 Linear: {len(smoke['linear_outputs']['per_layer'])}",
-        f"- 통과 / 실패 Linear: {len(per_layer) - len(failed_layers)} / {len(failed_layers)}",
-        f"- All-close: `{linear['allclose']}` (`atol={linear['atol']}`, `rtol={linear['rtol']}`)",
-        f"- Max abs / MAE / RMSE: {number(linear['max_abs_error'])} / "
-        f"{number(linear['mae'])} / {number(linear['rmse'])}",
-        f"- Relative L2 / cosine: {number(linear['relative_l2_error'])} / "
-        f"{number(linear['cosine_similarity'])}",
-        f"- 허용 오차 밖 element: {linear['outside_tolerance']}/{linear['elements']} "
-        f"({number(linear['outside_tolerance_fraction'])})",
-        "- Relative L2가 큰 Linear:",
-        *[
-            f"  - `{name}`: {number(metrics['relative_l2_error'])}"
-            for name, metrics in worst_layers
-        ],
-        "",
-        "## Smoke logits",
-        "",
-        f"- 문서 / token: {smoke['scope']['documents']} / {smoke['scope']['tokens']}",
-        f"- Logit all-close: `{smoke_logits['allclose']}`",
-        f"- Logit max abs / RMSE: {number(smoke_logits['max_abs_error'])} / "
-        f"{number(smoke_logits['rmse'])}",
-        f"- Symmetric KL: {number(smoke_distribution['symmetric_kl_nats'])}",
-        f"- JS divergence: {number(smoke_distribution['js_divergence_nats'])}",
-        f"- Top-1 agreement: {number(smoke_distribution['top1_agreement'])}",
-        f"- Standard / FPINT perplexity: {number(smoke_distribution.get('fp_perplexity'))} / "
-        f"{number(smoke_distribution.get('quant_perplexity'))}",
-        "",
-        "## 성능 참고",
-        "",
-        f"- Standard tokens/s: {number(smoke['timing']['standard_tokens_per_second'])}",
-        f"- FPINT CUDA tokens/s: {number(smoke['timing']['fpint_cuda_tokens_per_second'])}",
-        "",
+        "| K | EXP max | Common finite | Fraction | FP16-ref non-finite | Conventional non-finite | FPINT non-finite | Target |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |",
     ]
-    if full is None:
-        lines.extend(
-            [
-                "## Full workload",
-                "",
-                "- 아직 실행 결과가 없다.",
-            ]
-        )
-    else:
-        wikitext = full["tasks"]["wikitext"]
-        micro = full["accuracy_micro"]
-        lines.extend(
-            [
-                "## Full WikiText",
-                "",
-                f"- Standard / FPINT PPL: {number(wikitext['standard'])} / "
-                f"{number(wikitext['fpint_cuda'])}",
-                f"- Absolute / relative delta: {number(wikitext['delta_fpint_minus_standard'])} / "
-                f"{number(wikitext['relative_delta'])}",
-                "",
-                "## Downstream tasks",
-                "",
-                "| Task | Samples | Standard | FPINT | Delta (pp) | Standard stderr | FPINT stderr |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
-            ]
-        )
-        for name in TASK_METRICS:
-            metrics = full["tasks"][name]
-            if metrics["kind"] != "accuracy":
-                continue
-            lines.append(
-                f"| {name} | {metrics['samples']} | {number(metrics['standard'])} | "
-                f"{number(metrics['fpint_cuda'])} | {number(metrics['delta_percentage_points'])} | "
-                f"{number(metrics['standard_stderr'])} | {number(metrics['fpint_cuda_stderr'])} |"
-            )
-        lines.extend(
-            [
-                "",
-                f"- Micro accuracy standard / FPINT: {number(micro['standard'])} / "
-                f"{number(micro['fpint_cuda'])}",
-                f"- Micro accuracy delta: {number(100.0 * micro['delta_fpint_minus_standard'])} pp",
-                "",
-                "## 전체 workload 성능",
-                "",
-                f"- Standard lm-eval seconds 합: {number(full['evaluation_seconds_sum']['standard'])}",
-                f"- FPINT CUDA lm-eval seconds 합: {number(full['evaluation_seconds_sum']['fpint_cuda'])}",
-                "- 자동 품질 pass/fail 기준 없음",
-            ]
+    for k in config["k_values"]:
+        row = summary["by_k"][str(k)]
+        coverage = row["coverage"]
+        lines.append(
+            f"| {k} | {exp_by_k[str(k)]} | {coverage['common_finite_elements']} / "
+            f"{coverage['output_elements']} | {number(coverage['common_finite_fraction'])} | "
+            f"{coverage['fp16_rounded_reference_nonfinite']} | "
+            f"{coverage['conventional_nonfinite']} | {coverage['fp_int_nonfinite']} | "
+            f"{'pass' if row['finite_target_met'] else 'fail'} |"
         )
     lines.extend(
         [
             "",
-            f"Checkpoint SHA256: `{smoke['conditions']['quantized_checkpoint_sha256']}`",
+            "## RMSE / signed error",
             "",
-            "원본 JSON/CSV에 환경, coverage, layer별 오차와 checkpoint 경로가 기록되어 있다.",
+            "아래 `mean ± std`는 30개 trial metric의 평균과 sample std다.",
+            "",
+            "| K | Conventional RMSE mean ± std | FPINT RMSE mean ± std | FPINT-Conv | FPINT/Conv | Conventional signed-error std | FPINT signed-error std |",
+            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for k in config["k_values"]:
+        row = summary["by_k"][str(k)]
+        conv = row["conventional_err"]
+        fp_int = row["fp_int_err"]
+        comparison = row["comparison"]["trial_rmse_mean"]
+        lines.append(
+            f"| {k} | {number(conv['trial_rmse_mean'])} ± "
+            f"{number(conv['trial_rmse_sample_std'])} | "
+            f"{number(fp_int['trial_rmse_mean'])} ± "
+            f"{number(fp_int['trial_rmse_sample_std'])} | "
+            f"{number(comparison['delta_fp_int_minus_conventional'])} | "
+            f"{number(comparison['ratio_fp_int_over_conventional'])} | "
+            f"{number(conv['global_signed_error_std'])} | "
+            f"{number(fp_int['global_signed_error_std'])} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## FP16 ULP error",
+            "",
+            "| K | Conventional mean ULP ± std | FPINT mean ULP ± std | FPINT-Conv | FPINT/Conv | Conventional ULP std | FPINT ULP std | Conventional / FPINT p95 |",
+            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for k in config["k_values"]:
+        row = summary["by_k"][str(k)]
+        conv = row["conventional_err"]
+        fp_int = row["fp_int_err"]
+        comparison = row["comparison"]["trial_mean_ulp_mean"]
+        lines.append(
+            f"| {k} | {number(conv['trial_mean_ulp_mean'])} ± "
+            f"{number(conv['trial_mean_ulp_sample_std'])} | "
+            f"{number(fp_int['trial_mean_ulp_mean'])} ± "
+            f"{number(fp_int['trial_mean_ulp_sample_std'])} | "
+            f"{number(comparison['delta_fp_int_minus_conventional'])} | "
+            f"{number(comparison['ratio_fp_int_over_conventional'])} | "
+            f"{number(conv['global_std_ulp'])} | {number(fp_int['global_std_ulp'])} | "
+            f"{number(conv['trial_p95_ulp_mean'])} / "
+            f"{number(fp_int['trial_p95_ulp_mean'])} |"
+        )
+    qcol = overall["qcol_correctness"]
+    sign = overall["activation_sign_bits"]
+    lines.extend(
+        [
+            "",
+            "## Correctness / reproducibility",
+            "",
+            f"- Activation sign-bit positive / negative: {sign['positive']} / {sign['negative']}",
+            f"- FPINT Torch vs QCOL reference all-close: "
+            f"{qcol['torch_allclose_cases']}/{overall['cases']}",
+            f"- FPINT CUDA vs QCOL reference all-close: "
+            f"{qcol['cuda_allclose_cases']}/{qcol['cuda_cases']}",
+            f"- Conventional reduced-precision reduction: "
+            f"`{random['environment']['allow_fp16_reduced_precision_reduction']}`",
+            "",
+            f"CUDA kernel SHA256: `{random['environment']['fpint_cuda_kernel_sha256']}`",
+            "",
+            "원본 JSON/CSV에는 case별 seed, field 분포, common finite mask, "
+            "Conventional_err와 FP_INT_err가 기록되어 있다.",
             "",
         ]
     )
@@ -340,14 +318,12 @@ def render_report(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--random", type=Path, required=True)
-    parser.add_argument("--smoke", type=Path, required=True)
     parser.add_argument("--standard-results", type=Path, nargs="+")
     parser.add_argument("--fpint-results", type=Path, nargs="+")
     parser.add_argument("--metrics-output", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     random = load(args.random)
-    smoke = load(args.smoke)
     if bool(args.standard_results) != bool(args.fpint_results):
         parser.error("--standard-results and --fpint-results must be supplied together")
     full = None
@@ -364,7 +340,7 @@ def main() -> None:
         )
     elif args.metrics_output is not None:
         parser.error("--metrics-output requires full results")
-    report = render_report(random, smoke, full)
+    report = render_report(random)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report, encoding="utf-8")
     print(f"Saved report: {args.output}")

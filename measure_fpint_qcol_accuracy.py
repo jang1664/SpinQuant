@@ -1,29 +1,41 @@
 #!/usr/bin/env python3
-"""Sweep random QCOL_REAL_2SCOMP inputs against the independent reference."""
+"""Compare conventional and FPINT FP16 outputs against a GPU FP64 reference."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import math
 import platform
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import torch
 
-from fpint_emul import (
-    FpIntConfig,
-    dequantize_weight,
-    fpint_linear,
-    qcol_real_2scomp_reference,
-)
+from fpint_emul import FpIntConfig, fpint_linear, qcol_real_2scomp_reference
 
 
-DEFAULT_K_VALUES = (127, 128, 129, 255, 256, 257, 1024, 4096, 14336)
-ZERO_MODES = ("symmetric", "asymmetric")
-DISTRIBUTIONS = ("gaussian", "componentwise")
+SAMPLER_VERSION = "k_scaled_finite_fp16_fields_v3"
+DEFAULT_K_VALUES = (128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768)
+DEFAULT_EXPONENT_MAX_BY_K = {
+    128: 24,
+    256: 24,
+    512: 24,
+    1024: 23,
+    2048: 23,
+    4096: 22,
+    8192: 21,
+    16384: 21,
+    32768: 20,
+}
+FP16_SIGN_MIN = 0
+FP16_SIGN_MAX = 1
+FP16_EXPONENT_MIN = 0
+FP16_MANTISSA_MIN = 0
+FP16_MANTISSA_MAX = 1023
 
 
 def parse_int_list(value: str) -> tuple[int, ...]:
@@ -31,19 +43,77 @@ def parse_int_list(value: str) -> tuple[int, ...]:
         values = tuple(int(item) for item in value.split(",") if item)
     except ValueError as error:
         raise argparse.ArgumentTypeError("expected comma-separated integers") from error
-    if not values or any(value <= 0 for value in values):
+    if not values or any(item <= 0 for item in values):
         raise argparse.ArgumentTypeError("all values must be positive")
     return values
 
 
-def componentwise_fp16(rng: np.random.Generator, shape: tuple[int, ...]) -> np.ndarray:
-    """Sample sign, exponent and mantissa independently, then round to FP16."""
+def parse_exponent_max_map(value: str) -> dict[int, int]:
+    result: dict[int, int] = {}
+    try:
+        for item in value.split(","):
+            k_text, exponent_text = item.split(":", maxsplit=1)
+            k = int(k_text)
+            exponent = int(exponent_text)
+            if k <= 0 or not FP16_EXPONENT_MIN <= exponent <= 30:
+                raise ValueError
+            if k in result:
+                raise ValueError
+            result[k] = exponent
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "expected unique K:EXP pairs with K > 0 and 0 <= EXP <= 30"
+        ) from error
+    if not result:
+        raise argparse.ArgumentTypeError("at least one K:EXP pair is required")
+    return result
 
-    sign = rng.integers(0, 2, size=shape, dtype=np.int8)
-    exponent = rng.integers(-24, 16, size=shape, dtype=np.int16)
-    mantissa = np.clip(np.rint(rng.normal(512.0, 256.0, size=shape)), 0, 1023)
-    value = (1.0 + mantissa / 1024.0) * np.exp2(exponent.astype(np.float64))
-    return np.where(sign != 0, -value, value).astype(np.float16)
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sample_finite_fp16_fields(
+    rng: np.random.Generator,
+    shape: tuple[int, ...],
+    exponent_max: int,
+) -> np.ndarray:
+    """Uniformly sample independent finite IEEE FP16 fields."""
+
+    if not FP16_EXPONENT_MIN <= exponent_max <= 30:
+        raise ValueError("exponent_max must be in [0, 30]")
+    sign = rng.integers(
+        FP16_SIGN_MIN, FP16_SIGN_MAX + 1, size=shape, dtype=np.uint16
+    )
+    exponent = rng.integers(
+        FP16_EXPONENT_MIN, exponent_max + 1, size=shape, dtype=np.uint16
+    )
+    mantissa = rng.integers(
+        FP16_MANTISSA_MIN,
+        FP16_MANTISSA_MAX + 1,
+        size=shape,
+        dtype=np.uint16,
+    )
+    bits = (sign << np.uint16(15)) | (exponent << np.uint16(10)) | mantissa
+    values = np.ascontiguousarray(bits).view(np.float16)
+    if not np.isfinite(values).all():
+        raise AssertionError("finite FP16 field sampler produced NaN or Inf")
+    return values
+
+
+def activation_field_stats(activation: np.ndarray) -> dict[str, int]:
+    bits = np.ascontiguousarray(activation).view(np.uint16)
+    negative = int(((bits >> np.uint16(15)) != 0).sum())
+    return {
+        "activation_elements": int(bits.size),
+        "positive_sign_bits": int(bits.size - negative),
+        "negative_sign_bits": negative,
+        "numeric_zeros": int((activation == 0).sum()),
+    }
 
 
 def make_case(
@@ -52,76 +122,390 @@ def make_case(
     k: int,
     n: int,
     config: FpIntConfig,
-    zero_mode: str,
-    distribution: str,
     seed: int,
+    exponent_max: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    rng = np.random.default_rng(seed)
-    if distribution == "componentwise":
-        activation = componentwise_fp16(rng, (m, k))
-    elif distribution == "gaussian":
-        activation = rng.normal(size=(m, k)).astype(np.float16)
-    else:
-        raise ValueError(f"unknown distribution: {distribution}")
-
+    seed_sequence = np.random.SeedSequence(seed)
+    activation_rng, weight_rng = [
+        np.random.default_rng(child) for child in seed_sequence.spawn(2)
+    ]
+    activation = sample_finite_fp16_fields(
+        activation_rng, (m, k), exponent_max
+    )
     qmin = -(1 << (config.weight_bits - 1))
     qmax = (1 << (config.weight_bits - 1)) - 1
-    weight = rng.integers(qmin, qmax + 1, size=(n, k), dtype=np.int16).astype(
-        np.int8
-    )
+    weight = weight_rng.integers(
+        qmin, qmax + 1, size=(n, k), dtype=np.int16
+    ).astype(np.int8)
     groups = config.group_count(k)
-    scale = rng.uniform(2.0**-14, 2.0**-11, size=(n, groups)).astype(np.float16)
-    if zero_mode == "symmetric":
-        zero = np.zeros((n, groups), dtype=np.int32)
-    elif zero_mode == "asymmetric":
-        zero = rng.integers(-4, 4, size=(n, groups), dtype=np.int32)
-        if not np.any(zero):
-            zero[0, 0] = 1
-    else:
-        raise ValueError(f"unknown zero mode: {zero_mode}")
+    scale = np.ones((n, groups), dtype=np.float16)
+    zero = np.zeros((n, groups), dtype=np.int32)
     return activation, weight, scale, zero
 
 
-def error_metrics(actual: torch.Tensor, expected: torch.Tensor, atol: float, rtol: float) -> dict:
+def fp64_reference_linear(
+    activation: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    """GPU/CPU FP64 ground truth; independent of FPINT configuration."""
+
+    return torch.nn.functional.linear(
+        activation.to(torch.float64), weight.to(torch.float64)
+    )
+
+
+def conventional_linear(
+    activation: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    """Actual FP16 Linear after converting only the integer weight to FP16."""
+
+    return torch.nn.functional.linear(activation, weight.to(torch.float16))
+
+
+def qcol_allclose_metrics(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    atol: float,
+    rtol: float,
+) -> dict[str, Any]:
     actual = actual.detach().float().cpu()
     expected = expected.detach().float().cpu()
-    difference = (actual - expected).abs()
-    threshold = atol + rtol * expected.abs()
-    outside = difference > threshold
+    if actual.shape != expected.shape:
+        raise ValueError(
+            f"shape mismatch: {tuple(actual.shape)} != {tuple(expected.shape)}"
+        )
+    matching = torch.isclose(
+        actual, expected, atol=atol, rtol=rtol, equal_nan=True
+    )
+    both_finite = torch.isfinite(actual) & torch.isfinite(expected)
+    finite_error = (actual[both_finite] - expected[both_finite]).abs()
     return {
-        "allclose": not bool(outside.any()),
-        "elements": difference.numel(),
-        "outside_tolerance": int(outside.sum()),
-        "outside_tolerance_fraction": float(outside.float().mean()),
-        "max_abs": float(difference.max()),
-        "mean_abs": float(difference.mean()),
-        "rms": float(difference.square().mean().sqrt()),
+        "allclose": bool(matching.all()),
+        "atol": atol,
+        "rtol": rtol,
+        "elements": matching.numel(),
+        "outside_tolerance": int((~matching).sum().item()),
+        "matching_fraction": float(matching.float().mean().item()),
+        "max_abs": float(finite_error.max().item()) if finite_error.numel() else None,
+        "reference_nonfinite": int((~torch.isfinite(expected)).sum().item()),
+        "candidate_nonfinite": int((~torch.isfinite(actual)).sum().item()),
+        "nonfinite_mismatch": int(((~matching) & (~both_finite)).sum().item()),
     }
 
 
-def flatten_rows(records: Iterable[dict]) -> Iterable[dict]:
+def _ordered_fp16(values: torch.Tensor) -> torch.Tensor:
+    """Map finite FP16 values to monotonically ordered integer coordinates."""
+
+    values = values.to(dtype=torch.float16, device="cpu").contiguous()
+    if not bool(torch.isfinite(values).all()):
+        raise ValueError("FP16 ULP distance requires finite values")
+    bits = values.view(torch.int16).to(torch.int32) & 0xFFFF
+    magnitude = bits & 0x7FFF
+    negative = (bits & 0x8000) != 0
+    return torch.where(negative, 0x8000 - magnitude, 0x8000 + magnitude)
+
+
+def fp16_ulp_distance(actual: torch.Tensor, expected: torch.Tensor) -> torch.Tensor:
+    if actual.shape != expected.shape:
+        raise ValueError(
+            f"shape mismatch: {tuple(actual.shape)} != {tuple(expected.shape)}"
+        )
+    return (_ordered_fp16(actual) - _ordered_fp16(expected)).abs().to(torch.int32)
+
+
+def _candidate_error_metrics(
+    candidate: torch.Tensor,
+    reference_fp64: torch.Tensor,
+    reference_fp16: torch.Tensor,
+    common_finite: torch.Tensor,
+) -> dict[str, Any]:
+    elements = int(common_finite.sum().item())
+    if not elements:
+        return {
+            "elements": 0,
+            "rmse": None,
+            "signed_error_mean": None,
+            "signed_error_std": None,
+            "mean_ulp": None,
+            "std_ulp": None,
+            "p50_ulp": None,
+            "p95_ulp": None,
+            "max_ulp": None,
+            "error_sum": 0.0,
+            "squared_error_sum": 0.0,
+            "ulp_sum": 0.0,
+            "squared_ulp_sum": 0.0,
+        }
+
+    candidate_values = candidate[common_finite].double()
+    reference_values = reference_fp64[common_finite]
+    signed_error = candidate_values - reference_values
+    error_sum = float(signed_error.sum().item())
+    squared_error_sum = float(signed_error.square().sum().item())
+    error_mean = error_sum / elements
+    error_variance = max(squared_error_sum / elements - error_mean**2, 0.0)
+
+    ulp = fp16_ulp_distance(
+        candidate[common_finite], reference_fp16[common_finite]
+    ).double()
+    ulp_sum = float(ulp.sum().item())
+    squared_ulp_sum = float(ulp.square().sum().item())
+    ulp_mean = ulp_sum / elements
+    ulp_variance = max(squared_ulp_sum / elements - ulp_mean**2, 0.0)
+    ulp_numpy = ulp.numpy()
+    return {
+        "elements": elements,
+        "rmse": math.sqrt(squared_error_sum / elements),
+        "signed_error_mean": error_mean,
+        "signed_error_std": math.sqrt(error_variance),
+        "mean_ulp": ulp_mean,
+        "std_ulp": math.sqrt(ulp_variance),
+        "p50_ulp": float(np.percentile(ulp_numpy, 50)),
+        "p95_ulp": float(np.percentile(ulp_numpy, 95)),
+        "max_ulp": int(ulp.max().item()),
+        "error_sum": error_sum,
+        "squared_error_sum": squared_error_sum,
+        "ulp_sum": ulp_sum,
+        "squared_ulp_sum": squared_ulp_sum,
+    }
+
+
+def paired_error_metrics(
+    conventional: torch.Tensor,
+    fp_int: torch.Tensor,
+    reference_fp64: torch.Tensor,
+) -> dict[str, Any]:
+    """Compute both errors on one shared finite-output mask."""
+
+    conventional = conventional.detach().to(dtype=torch.float16, device="cpu")
+    fp_int = fp_int.detach().to(dtype=torch.float16, device="cpu")
+    reference_fp64 = reference_fp64.detach().to(dtype=torch.float64, device="cpu")
+    if conventional.shape != fp_int.shape or conventional.shape != reference_fp64.shape:
+        raise ValueError("conventional, FPINT and FP64 outputs must have the same shape")
+    reference_fp16 = reference_fp64.to(torch.float16)
+    reference_fp64_finite = torch.isfinite(reference_fp64)
+    reference_fp16_finite = torch.isfinite(reference_fp16)
+    conventional_finite = torch.isfinite(conventional)
+    fp_int_finite = torch.isfinite(fp_int)
+    common_finite = (
+        reference_fp64_finite
+        & reference_fp16_finite
+        & conventional_finite
+        & fp_int_finite
+    )
+    total = reference_fp64.numel()
+    common = int(common_finite.sum().item())
+    coverage = {
+        "output_elements": total,
+        "fp64_reference_nonfinite": int((~reference_fp64_finite).sum().item()),
+        "fp16_rounded_reference_nonfinite": int(
+            (~reference_fp16_finite).sum().item()
+        ),
+        "conventional_nonfinite": int((~conventional_finite).sum().item()),
+        "fp_int_nonfinite": int((~fp_int_finite).sum().item()),
+        "common_finite_elements": common,
+        "common_finite_fraction": common / total if total else None,
+    }
+    return {
+        "coverage": coverage,
+        "conventional_err": _candidate_error_metrics(
+            conventional, reference_fp64, reference_fp16, common_finite
+        ),
+        "fp_int_err": _candidate_error_metrics(
+            fp_int, reference_fp64, reference_fp16, common_finite
+        ),
+    }
+
+
+def _sample_std(values: list[float]) -> float | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return 0.0
+    return float(np.std(np.asarray(values, dtype=np.float64), ddof=1))
+
+
+def _mean(values: list[float]) -> float | None:
+    return float(np.mean(values)) if values else None
+
+
+def _aggregate_error(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    valid = [row for row in rows if row["elements"]]
+    elements = sum(row["elements"] for row in valid)
+    error_sum = sum(row["error_sum"] for row in valid)
+    squared_error_sum = sum(row["squared_error_sum"] for row in valid)
+    ulp_sum = sum(row["ulp_sum"] for row in valid)
+    squared_ulp_sum = sum(row["squared_ulp_sum"] for row in valid)
+    if elements:
+        error_mean = error_sum / elements
+        ulp_mean = ulp_sum / elements
+        global_metrics = {
+            "elements": elements,
+            "global_rmse": math.sqrt(squared_error_sum / elements),
+            "global_signed_error_mean": error_mean,
+            "global_signed_error_std": math.sqrt(
+                max(squared_error_sum / elements - error_mean**2, 0.0)
+            ),
+            "global_mean_ulp": ulp_mean,
+            "global_std_ulp": math.sqrt(
+                max(squared_ulp_sum / elements - ulp_mean**2, 0.0)
+            ),
+            "global_max_ulp": max(row["max_ulp"] for row in valid),
+        }
+    else:
+        global_metrics = {
+            "elements": 0,
+            "global_rmse": None,
+            "global_signed_error_mean": None,
+            "global_signed_error_std": None,
+            "global_mean_ulp": None,
+            "global_std_ulp": None,
+            "global_max_ulp": None,
+        }
+
+    rmse = [row["rmse"] for row in valid]
+    mean_ulp = [row["mean_ulp"] for row in valid]
+    p50_ulp = [row["p50_ulp"] for row in valid]
+    p95_ulp = [row["p95_ulp"] for row in valid]
+    return {
+        **global_metrics,
+        "trials_with_metrics": len(valid),
+        "trial_rmse_mean": _mean(rmse),
+        "trial_rmse_sample_std": _sample_std(rmse),
+        "trial_mean_ulp_mean": _mean(mean_ulp),
+        "trial_mean_ulp_sample_std": _sample_std(mean_ulp),
+        "trial_p50_ulp_mean": _mean(p50_ulp),
+        "trial_p95_ulp_mean": _mean(p95_ulp),
+    }
+
+
+def _delta_ratio(fp_int: float | None, conventional: float | None) -> dict[str, Any]:
+    if fp_int is None or conventional is None:
+        return {"delta_fp_int_minus_conventional": None, "ratio_fp_int_over_conventional": None}
+    return {
+        "delta_fp_int_minus_conventional": fp_int - conventional,
+        "ratio_fp_int_over_conventional": (
+            fp_int / conventional if conventional != 0 else None
+        ),
+    }
+
+
+def summarize_records(
+    records: list[dict[str, Any]], finite_target: float
+) -> dict[str, Any]:
+    def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        coverage_rows = [row["coverage"] for row in rows]
+        total = sum(row["output_elements"] for row in coverage_rows)
+        common = sum(row["common_finite_elements"] for row in coverage_rows)
+        coverage = {
+            "output_elements": total,
+            "fp64_reference_nonfinite": sum(
+                row["fp64_reference_nonfinite"] for row in coverage_rows
+            ),
+            "fp16_rounded_reference_nonfinite": sum(
+                row["fp16_rounded_reference_nonfinite"] for row in coverage_rows
+            ),
+            "conventional_nonfinite": sum(
+                row["conventional_nonfinite"] for row in coverage_rows
+            ),
+            "fp_int_nonfinite": sum(row["fp_int_nonfinite"] for row in coverage_rows),
+            "common_finite_elements": common,
+            "common_finite_fraction": common / total if total else None,
+        }
+        conventional = _aggregate_error(
+            [row["comparisons"]["conventional_err"] for row in rows]
+        )
+        fp_int = _aggregate_error(
+            [row["comparisons"]["fp_int_err"] for row in rows]
+        )
+        return {
+            "cases": len(rows),
+            "coverage": coverage,
+            "finite_target_met": bool(
+                coverage["common_finite_fraction"] is not None
+                and coverage["common_finite_fraction"] >= finite_target
+            ),
+            "activation_sign_bits": {
+                "positive": sum(row["input_stats"]["positive_sign_bits"] for row in rows),
+                "negative": sum(row["input_stats"]["negative_sign_bits"] for row in rows),
+            },
+            "qcol_correctness": {
+                "torch_allclose_cases": sum(
+                    row["comparisons"]["fpint_torch_vs_qcol_reference"]["allclose"]
+                    for row in rows
+                ),
+                "cuda_cases": sum(
+                    "fpint_cuda_vs_qcol_reference" in row["comparisons"]
+                    for row in rows
+                ),
+                "cuda_allclose_cases": sum(
+                    row["comparisons"].get(
+                        "fpint_cuda_vs_qcol_reference", {"allclose": False}
+                    )["allclose"]
+                    for row in rows
+                ),
+            },
+            "conventional_err": conventional,
+            "fp_int_err": fp_int,
+            "comparison": {
+                "trial_rmse_mean": _delta_ratio(
+                    fp_int["trial_rmse_mean"], conventional["trial_rmse_mean"]
+                ),
+                "trial_mean_ulp_mean": _delta_ratio(
+                    fp_int["trial_mean_ulp_mean"],
+                    conventional["trial_mean_ulp_mean"],
+                ),
+            },
+        }
+
+    k_values = sorted({int(record["k"]) for record in records})
+    return {
+        "overall": aggregate(records),
+        "by_k": {
+            str(k): aggregate([record for record in records if record["k"] == k])
+            for k in k_values
+        },
+    }
+
+
+def flatten_rows(records: Iterable[dict[str, Any]]) -> Iterable[dict[str, Any]]:
     for record in records:
         common = {
             key: record[key]
-            for key in ("trial", "seed", "distribution", "zero_mode", "m", "k", "n")
+            for key in ("trial", "seed", "m", "k", "n", "exponent_max")
         }
         for comparison, metrics in record["comparisons"].items():
             yield {**common, "comparison": comparison, **metrics}
+        yield {
+            **common,
+            "comparison": "coverage",
+            **record["coverage"],
+            **record["input_stats"],
+        }
 
 
-def write_csv(path: Path, records: list[dict]) -> None:
+def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
     rows = list(flatten_rows(records))
+    fieldnames = list(rows[0])
+    extra_names = sorted({key for row in rows for key in row} - set(fieldnames))
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(handle, fieldnames=fieldnames + extra_names)
         writer.writeheader()
         writer.writerows(rows)
 
 
-def run(args: argparse.Namespace) -> dict:
+def run(args: argparse.Namespace) -> dict[str, Any]:
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available")
+    exponent_max_by_k = dict(args.exponent_max_by_k)
+    missing = set(args.k_values) - set(exponent_max_by_k)
+    extra = set(exponent_max_by_k) - set(args.k_values)
+    if missing or extra:
+        raise ValueError(
+            f"exponent map must exactly match K values; missing={sorted(missing)}, "
+            f"extra={sorted(extra)}"
+        )
     config = FpIntConfig(
         weight_bits=args.bits,
         group_size=args.group_size,
@@ -129,100 +513,157 @@ def run(args: argparse.Namespace) -> dict:
         extra_bits=args.extra_bits,
         reduce_extra_bits=args.reduce_extra_bits,
     )
-    records: list[dict] = []
+    records: list[dict[str, Any]] = []
     all_reference_close = True
+    all_signs_present = True
     case_index = 0
+    total_cases = args.trials * len(args.k_values)
     for trial in range(args.trials):
-        for distribution in args.distributions:
-            for zero_mode in args.zero_modes:
-                for k in args.k_values:
-                    seed = args.base_seed + case_index
-                    case_index += 1
-                    activation, weight, scale, zero = make_case(
-                        m=args.m,
-                        k=k,
-                        n=args.n,
-                        config=config,
-                        zero_mode=zero_mode,
-                        distribution=distribution,
-                        seed=seed,
-                    )
-                    reference = torch.from_numpy(
-                        qcol_real_2scomp_reference(
-                            activation, weight, scale, zero, config
-                        )
-                    )
-                    tensors = tuple(
-                        torch.from_numpy(value).to(device)
-                        for value in (activation, weight, scale, zero)
-                    )
-                    actual_torch = fpint_linear(
-                        *tensors, config, backend="fpint_torch"
-                    )
-                    comparisons = {
-                        "fpint_torch_vs_reference": error_metrics(
-                            actual_torch, reference, args.atol, args.rtol
-                        )
-                    }
-                    if device.type == "cuda":
-                        actual_cuda = fpint_linear(
-                            *tensors, config, backend="fpint_cuda"
-                        )
-                        comparisons["fpint_cuda_vs_reference"] = error_metrics(
-                            actual_cuda, reference, args.atol, args.rtol
-                        )
-                    else:
-                        actual_cuda = actual_torch
-                    qdq = torch.nn.functional.linear(
-                        tensors[0],
-                        dequantize_weight(tensors[1], tensors[2], tensors[3], config),
-                    )
-                    comparisons["fpint_vs_standard_qdq"] = error_metrics(
-                        actual_cuda, qdq, args.atol, args.rtol
-                    )
-                    for name, metrics in comparisons.items():
-                        if name.endswith("vs_reference"):
-                            all_reference_close &= metrics["allclose"]
-                    records.append(
-                        {
-                            "trial": trial,
-                            "seed": seed,
-                            "distribution": distribution,
-                            "zero_mode": zero_mode,
-                            "m": args.m,
-                            "k": k,
-                            "n": args.n,
-                            "comparisons": comparisons,
-                        }
-                    )
-                    print(
-                        f"[{case_index}/{args.trials * len(args.distributions) * len(args.zero_modes) * len(args.k_values)}] "
-                        f"{distribution} {zero_mode} K={k}: "
-                        f"reference_allclose={all(m['allclose'] for name, m in comparisons.items() if name.endswith('vs_reference'))}",
-                        flush=True,
-                    )
+        for k in args.k_values:
+            seed = args.base_seed + case_index
+            case_index += 1
+            exponent_max = exponent_max_by_k[k]
+            activation, weight, scale, zero = make_case(
+                m=args.m,
+                k=k,
+                n=args.n,
+                config=config,
+                seed=seed,
+                exponent_max=exponent_max,
+            )
+            input_stats = activation_field_stats(activation)
+            signs_present = (
+                input_stats["positive_sign_bits"] > 0
+                and input_stats["negative_sign_bits"] > 0
+            )
+            all_signs_present &= signs_present
 
+            qcol_reference = torch.from_numpy(
+                qcol_real_2scomp_reference(
+                    activation, weight, scale, zero, config
+                )
+            )
+            tensors = tuple(
+                torch.from_numpy(value).to(device)
+                for value in (activation, weight, scale, zero)
+            )
+            actual_torch = fpint_linear(
+                *tensors, config, backend="fpint_torch", has_zero=False
+            )
+            comparisons: dict[str, Any] = {
+                "fpint_torch_vs_qcol_reference": qcol_allclose_metrics(
+                    actual_torch, qcol_reference, args.atol, args.rtol
+                )
+            }
+            if device.type == "cuda":
+                actual_fp_int = fpint_linear(
+                    *tensors,
+                    config,
+                    backend="fpint_cuda",
+                    has_zero=False,
+                )
+                comparisons["fpint_cuda_vs_qcol_reference"] = qcol_allclose_metrics(
+                    actual_fp_int, qcol_reference, args.atol, args.rtol
+                )
+            else:
+                actual_fp_int = actual_torch
+
+            reference_fp64 = fp64_reference_linear(tensors[0], tensors[1])
+            conventional = conventional_linear(tensors[0], tensors[1])
+            numerical = paired_error_metrics(
+                conventional, actual_fp_int, reference_fp64
+            )
+            comparisons["conventional_err"] = numerical["conventional_err"]
+            comparisons["fp_int_err"] = numerical["fp_int_err"]
+            all_reference_close &= all(
+                metrics["allclose"]
+                for name, metrics in comparisons.items()
+                if name.endswith("vs_qcol_reference")
+            )
+            records.append(
+                {
+                    "trial": trial,
+                    "seed": seed,
+                    "m": args.m,
+                    "k": k,
+                    "n": args.n,
+                    "exponent_max": exponent_max,
+                    "input_stats": input_stats,
+                    "coverage": numerical["coverage"],
+                    "comparisons": comparisons,
+                }
+            )
+            print(
+                f"[{case_index}/{total_cases}] K={k} EXP<={exponent_max}: "
+                "qcol_allclose="
+                f"{all(metrics['allclose'] for name, metrics in comparisons.items() if name.endswith('vs_qcol_reference'))}, "
+                f"common_finite={numerical['coverage']['common_finite_elements']}/"
+                f"{numerical['coverage']['output_elements']}",
+                flush=True,
+            )
+
+    summary = summarize_records(records, args.finite_target)
+    finite_target_met = all(
+        row["finite_target_met"] for row in summary["by_k"].values()
+    )
+    passed = all_reference_close and all_signs_present and finite_target_met
+    kernel_path = Path(__file__).parent / "fpint_emul/csrc/fpint_cuda_kernel.cu"
     return {
-        "status": "pass" if all_reference_close else "fail",
+        "status": "pass" if passed else "fail",
+        "evaluation_policy": {
+            "fp64_gpu_ground_truth": True,
+            "qcol_reference_must_be_allclose": True,
+            "common_finite_mask_for_paired_errors": True,
+            "minimum_common_finite_fraction_per_k": args.finite_target,
+            "candidate_error_ranking_is_diagnostic_only": True,
+        },
         "environment": {
             "python": platform.python_version(),
             "numpy": np.__version__,
             "torch": torch.__version__,
             "torch_cuda": torch.version.cuda,
+            "allow_fp16_reduced_precision_reduction": (
+                torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
+            ),
             "device": torch.cuda.get_device_name(device)
             if device.type == "cuda"
             else str(device),
+            "fpint_cuda_kernel_sha256": sha256_file(kernel_path),
         },
         "config": {
             **vars(config),
+            "sampler_version": SAMPLER_VERSION,
+            "operation": "raw_fp16_times_signed_int",
+            "identity_scale": 1.0,
+            "zero_point": 0,
+            "m": args.m,
+            "n": args.n,
             "atol": args.atol,
             "rtol": args.rtol,
             "trials": args.trials,
             "base_seed": args.base_seed,
             "k_values": list(args.k_values),
-            "distributions": list(args.distributions),
-            "zero_modes": list(args.zero_modes),
+            "finite_target": args.finite_target,
+            "fp16_fields": {
+                "sign": [FP16_SIGN_MIN, FP16_SIGN_MAX],
+                "exponent_min": FP16_EXPONENT_MIN,
+                "exponent_max_by_k": {
+                    str(k): exponent_max_by_k[k] for k in args.k_values
+                },
+                "mantissa": [FP16_MANTISSA_MIN, FP16_MANTISSA_MAX],
+                "sampling": "independent_uniform_raw_fields",
+            },
+            "integer_range": [
+                -(1 << (config.weight_bits - 1)),
+                (1 << (config.weight_bits - 1)) - 1,
+            ],
+            "paths": {
+                "fp64_reference": "FP64 activation x FP64-cast integer weight",
+                "conventional": "FP16 activation x FP16-cast integer weight",
+                "fp_int": "QCOL_REAL_2SCOMP FPINT CUDA emulation",
+            },
         },
+        "summary": summary,
         "records": records,
     }
 
@@ -234,15 +675,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mxu-rows", type=int, default=128)
     parser.add_argument("--extra-bits", type=int, default=19)
     parser.add_argument("--reduce-extra-bits", type=int, default=10)
-    parser.add_argument("--m", type=int, default=4)
-    parser.add_argument("--n", type=int, default=37)
+    parser.add_argument("--m", type=int, default=32)
+    parser.add_argument("--n", type=int, default=32)
     parser.add_argument("--k-values", type=parse_int_list, default=DEFAULT_K_VALUES)
+    parser.add_argument(
+        "--exp-max-by-k",
+        dest="exponent_max_by_k",
+        type=parse_exponent_max_map,
+        default=DEFAULT_EXPONENT_MAX_BY_K,
+    )
+    parser.add_argument("--finite-target", type=float, default=0.999)
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument("--base-seed", type=int, default=20260915)
-    parser.add_argument(
-        "--distributions", nargs="+", choices=DISTRIBUTIONS, default=DISTRIBUTIONS
-    )
-    parser.add_argument("--zero-modes", nargs="+", choices=ZERO_MODES, default=ZERO_MODES)
     parser.add_argument("--atol", type=float, default=1e-3)
     parser.add_argument("--rtol", type=float, default=1e-3)
     parser.add_argument("--device", default="cuda:0")
@@ -252,6 +696,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--m, --n and --trials must be positive")
     if args.atol < 0 or args.rtol < 0:
         parser.error("tolerances must be non-negative")
+    if not 0.0 <= args.finite_target <= 1.0:
+        parser.error("--finite-target must be in [0, 1]")
+    missing = set(args.k_values) - set(args.exponent_max_by_k)
+    extra = set(args.exponent_max_by_k) - set(args.k_values)
+    if missing or extra:
+        parser.error(
+            "--exp-max-by-k must contain exactly one entry for every --k-values entry"
+        )
     return args
 
 
