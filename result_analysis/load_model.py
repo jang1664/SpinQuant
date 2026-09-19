@@ -34,6 +34,7 @@ def load_model(
     fpint_mxu_rows=32,
     fpint_extra_bits=19,
     fpint_reduce_extra_bits=10,
+    compute_dtype="fp16",
     **kwargs
 ):
     """
@@ -63,6 +64,9 @@ def load_model(
         tuple: (model, tokenizer)
     """
     
+    if compute_dtype not in ("fp16", "bf16"):
+        raise ValueError("compute_dtype must be 'fp16' or 'bf16'")
+
     # Construct sys.argv
     args = [
         "python",
@@ -71,8 +75,8 @@ def load_model(
         "--do_eval", "True",
         "--per_device_eval_batch_size", str(per_device_eval_batch_size),
         "--model_max_length", str(model_max_length),
-        "--fp16", "True",
-        "--bf16", "False",
+        "--fp16", str(compute_dtype == "fp16"),
+        "--bf16", str(compute_dtype == "bf16"),
         "--save_safetensors", "False",
         "--w_bits", str(w_bits),
         "--a_bits", str(a_bits),

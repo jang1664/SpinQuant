@@ -1,4 +1,4 @@
-"""FP16 x signed-integer hardware emulation.
+"""FP16/BF16 x signed-integer hardware emulation.
 
 The legacy verification code historically imported ``fpint_emul.py`` as a
 top-level module. Keep those public symbols available while adding the new

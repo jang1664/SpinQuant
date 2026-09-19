@@ -63,6 +63,11 @@ def quantization_metadata(model_args, training_args, ptq_args, model, task_names
         "weight_quantizer": "RTN" if ptq_args.w_rtn else "GPTQ",
         "weight_act_order": bool(ptq_args.act_order),
         "activation_bits": ptq_args.a_bits,
+        "compute_dtype": "bf16" if training_args.bf16 else "fp16",
+        "activation_dtype": "bf16" if training_args.bf16 else "fp16",
+        "output_dtype": "bf16" if training_args.bf16 else "fp16",
+        "scale_dtype": "fp16",
+        "accumulator_dtype": "fp32",
         "query_bits": ptq_args.q_bits,
         "probability_bits": ptq_args.p_bits,
         "key_bits": ptq_args.k_bits,
@@ -86,6 +91,9 @@ def quantization_metadata(model_args, training_args, ptq_args, model, task_names
         "seed": ptq_args.seed,
         "rotate": ptq_args.rotate,
         "rotation_checkpoint": rotation_source,
+        "rotation_optimization_dtype": os.environ.get(
+            "SPINQUANT_ROTATION_DTYPE"
+        ),
         "rotation_checkpoint_sha256": file_sha256(rotation_source),
         "quantized_checkpoint": checkpoint_path,
         "quantized_checkpoint_sha256": checkpoint_sha256,

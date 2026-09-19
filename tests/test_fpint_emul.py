@@ -68,6 +68,74 @@ def _assert_reference_matches_torch(case, device="cpu", bias=None):
     )
 
 
+def _bf16_case(*, k=257, n=37, asymmetric=False, seed=0):
+    generator = torch.Generator().manual_seed(seed)
+    activation = torch.randn((2, 3, k), generator=generator).to(torch.bfloat16)
+    weight = torch.randint(-8, 8, (n, k), generator=generator, dtype=torch.int8)
+    groups = (k + 127) // 128
+    scale = (
+        torch.rand((n, groups), generator=generator) * 0.078 + 0.002
+    ).to(torch.float16)
+    zero = (
+        torch.randint(-8, 8, (n, groups), generator=generator, dtype=torch.int32)
+        if asymmetric
+        else torch.zeros((n, groups), dtype=torch.int32)
+    )
+    config = FpIntConfig(
+        4, group_size=128, mxu_rows=128, activation_format="bf16"
+    )
+    return activation, weight, scale, zero, config
+
+
+def _assert_bf16_reference_matches(case, backend="fpint_torch"):
+    activation, weight, scale, zero, config = case
+    expected = torch.from_numpy(
+        qcol_real_2scomp_reference(activation, weight, scale, zero, config)
+    )
+    device = "cuda" if backend == "fpint_cuda" else "cpu"
+    actual = fpint_linear(
+        activation.to(device),
+        weight.to(device),
+        scale.to(device),
+        zero.to(device),
+        config,
+        backend=backend,
+    )
+    assert actual.dtype == torch.bfloat16
+    torch.testing.assert_close(actual.cpu().float(), expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("asymmetric", [False, True])
+def test_bf16_reference_matches_torch_bit_exact(asymmetric):
+    _assert_bf16_reference_matches(
+        _bf16_case(asymmetric=asymmetric, seed=300 + asymmetric)
+    )
+
+
+def test_bf16_wide_exponents_subnormal_and_signed_zero():
+    bits = torch.tensor(
+        [0x0000, 0x8000, 0x0001, 0x007F, 0x0080, 0x3F80, 0xBF80, 0x7F7F],
+        dtype=torch.uint16,
+    )
+    activation = bits.view(torch.bfloat16).repeat(17)[:129].reshape(1, 129)
+    weight = torch.tensor([[-8, 7]], dtype=torch.int8).repeat(3, 65)[:, :129]
+    scale = torch.full((3, 2), 0.001, dtype=torch.float16)
+    zero = torch.tensor([[7, -8], [-8, 7], [3, -2]], dtype=torch.int32)
+    config = FpIntConfig(
+        4, group_size=128, mxu_rows=128, activation_format="bf16"
+    )
+    _assert_bf16_reference_matches((activation, weight, scale, zero, config))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("asymmetric", [False, True])
+def test_bf16_cuda_matches_independent_reference_bit_exact(asymmetric):
+    _assert_bf16_reference_matches(
+        _bf16_case(asymmetric=asymmetric, seed=400 + asymmetric),
+        backend="fpint_cuda",
+    )
+
+
 @pytest.mark.parametrize("bits", [4, 8])
 @pytest.mark.parametrize("asymmetric", [False, True])
 def test_reference_and_torch_cover_bits_and_zero_points(bits, asymmetric):
@@ -382,6 +450,24 @@ def test_weight_quantizer_training_path_retains_ste_gradient(symmetric):
     torch.testing.assert_close(weight.grad, torch.ones_like(weight))
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_groupwise_mse_weight_quantizer_supports_16bit_inputs(dtype):
+    torch.manual_seed(31)
+    weight = torch.randn(4, 35).to(dtype)
+    quantizer = WeightQuantizer()
+    quantizer.configure(
+        4,
+        perchannel=True,
+        sym=True,
+        mse=True,
+        weight_groupsize=32,
+    )
+    quantizer.find_params(weight)
+    assert quantizer.scale.dtype == dtype
+    assert quantizer.scale.shape == weight.shape
+    assert bool(torch.isfinite(quantizer.scale).all())
+
+
 def _wrapper_with_pending_metadata(asymmetric=True):
     torch.manual_seed(4)
     linear = torch.nn.Linear(35, 7, bias=True).half()
@@ -670,7 +756,7 @@ def test_ptq_model_fpint_checkpoint_round_trip_and_forward(tmp_path):
         use_cache=False,
     )
     config._attn_implementation = "eager"
-    checkpoint = tmp_path / "tiny-fpint.pt"
+    checkpoint = tmp_path / "new-checkpoint-dir" / "tiny-fpint.pt"
     args = SimpleNamespace(
         seed=0,
         rotate=False,

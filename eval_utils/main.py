@@ -7,6 +7,8 @@
 
 # This code is based on QuaRot(https://github.com/spcl/QuaRot/tree/main/quarot).
 # Licensed under Apache License 2.0.
+import os
+
 import torch
 import transformers
 
@@ -151,6 +153,8 @@ def ptq_model(args, model, model_args=None):
                 save_dict = sanitize_checkpoint_from_spinquant(
                     save_dict, group_size=args.w_groupsize
                 )
+            save_parent = os.path.dirname(os.path.abspath(args.save_qmodel_path))
+            os.makedirs(save_parent, exist_ok=True)
             torch.save(save_dict, args.save_qmodel_path)
     else:
         if getattr(args, "linear_backend", "standard") != "standard":

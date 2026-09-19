@@ -366,6 +366,9 @@ class ActQuantWrapper(torch.nn.Module):
         mxu_rows=mxu_rows,
         extra_bits=extra_bits,
         reduce_extra_bits=reduce_extra_bits,
+        activation_format=(
+            "bf16" if self.module.weight.dtype == torch.bfloat16 else "fp16"
+        ),
     )
     k = self.fpint_weight.shape[1]
     expected_group_index = torch.arange(
@@ -571,7 +574,7 @@ class WeightQuantizer(torch.nn.Module):
         best_zero = torch.round(-xmin / best_scale)
       if self.mse:
         best_error = torch.full(
-            (group.shape[0],), float("inf"), device=x.device, dtype=x.dtype
+            (group.shape[0],), float("inf"), device=x.device, dtype=torch.float32
         )
         for i in range(int(self.maxshrink * self.grid)):
           p = 1 - i / self.grid
@@ -584,7 +587,13 @@ class WeightQuantizer(torch.nn.Module):
             scale1 = (xmax1 - xmin1).clamp(min=1e-5) / self.maxq
             zero1 = torch.round(-xmin1 / scale1)
             candidate = asym_quant_dequant(group, scale1, zero1, self.maxq)
-          error = (candidate - group).abs().pow(self.norm).sum(dim=-1)
+          error = (
+              (candidate - group)
+              .abs()
+              .float()
+              .pow(self.norm)
+              .sum(dim=-1)
+          )
           better = error < best_error
           best_error[better] = error[better]
           best_scale[better] = scale1[better]

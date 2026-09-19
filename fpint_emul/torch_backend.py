@@ -5,10 +5,6 @@ import torch
 from .config import FpIntConfig
 
 
-_FP16_EXP_BIAS = 15
-_FP16_MANTISSA_BITS = 10
-
-
 def _validate_inputs(
     activation: torch.Tensor,
     weight: torch.Tensor,
@@ -18,8 +14,13 @@ def _validate_inputs(
     config: FpIntConfig,
     check_values: bool = True,
 ) -> None:
-    if activation.dtype != torch.float16 or activation.ndim < 1:
-        raise TypeError("activation must be float16 with shape [..., K]")
+    activation_dtype = (
+        torch.float16 if config.activation_format == "fp16" else torch.bfloat16
+    )
+    if activation.dtype != activation_dtype or activation.ndim < 1:
+        raise TypeError(
+            f"activation must be {config.activation_format} with shape [..., K]"
+        )
     if check_values and not bool(torch.isfinite(activation).all()):
         raise ValueError("NaN and Inf activations are not supported")
     if weight.dtype != torch.int8 or weight.ndim != 2:
@@ -48,9 +49,11 @@ def _validate_inputs(
         maximum_zero = int(zero.to(torch.int64).abs().max()) if zero.numel() else 0
         config.validate_zero_bound(maximum_zero)
     if bias is not None and (
-        bias.dtype != torch.float16 or tuple(bias.shape) != (weight.shape[0],)
+        bias.dtype != activation_dtype or tuple(bias.shape) != (weight.shape[0],)
     ):
-        raise TypeError(f"bias must be float16 with shape {(weight.shape[0],)}")
+        raise TypeError(
+            f"bias must be {config.activation_format} with shape {(weight.shape[0],)}"
+        )
     tensors = (weight, scale, zero) + (() if bias is None else (bias,))
     if any(t.device != activation.device for t in tensors):
         raise ValueError("activation, weight, scale, zero and bias must share a device")
@@ -60,6 +63,8 @@ def prealign_torch(
     activation: torch.Tensor,
     extra_bits: int,
     mxu_rows: int,
+    mantissa_bits: int = 10,
+    exponent_bits: int = 5,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     rows, k = activation.shape
     tiles = (k + mxu_rows - 1) // mxu_rows
@@ -68,18 +73,27 @@ def prealign_torch(
         activation = torch.nn.functional.pad(activation, (0, padded_k - k))
     bits = activation.contiguous().view(torch.int16).to(torch.int32) & 0xFFFF
     sign = (bits >> 15) & 1
-    exponent = (bits >> 10) & 0x1F
-    mantissa = bits & 0x3FF
+    exponent_mask = (1 << exponent_bits) - 1
+    mantissa_mask = (1 << mantissa_bits) - 1
+    exponent = (bits >> mantissa_bits) & exponent_mask
+    mantissa = bits & mantissa_mask
     exponent_for_align = torch.where(
         exponent == 0, torch.ones_like(exponent), exponent
     )
     maximum = exponent_for_align.view(rows, tiles, mxu_rows).max(dim=2).values
-    hidden = ((exponent != 0).to(torch.int64) << _FP16_MANTISSA_BITS) | mantissa
+    hidden = ((exponent != 0).to(torch.int64) << mantissa_bits) | mantissa
     shifts = (
         maximum.unsqueeze(-1)
         - exponent_for_align.view(rows, tiles, mxu_rows)
     ).reshape(rows, padded_k)
-    aligned = (hidden.to(torch.int64) << extra_bits) >> shifts.to(torch.int64)
+    shifted = hidden.to(torch.int64) << extra_bits
+    # PyTorch/CUDA shifts by >= 64 are backend-dependent. The mathematical
+    # aligned value is zero once every significand bit has been discarded.
+    aligned = torch.where(
+        shifts >= 63,
+        torch.zeros_like(shifted),
+        shifted >> shifts.clamp(max=62).to(torch.int64),
+    )
     aligned = torch.where(sign.bool(), -aligned, aligned)
     return aligned, maximum.to(torch.int16)
 
@@ -107,14 +121,26 @@ def qcol_real_2scomp_torch(
     flat = activation.contiguous().reshape(-1, k)
     rows = flat.shape[0]
     if rows == 0:
-        return torch.empty((*original_shape, n), dtype=torch.float16, device=activation.device)
+        return torch.empty(
+            (*original_shape, n), dtype=activation.dtype, device=activation.device
+        )
 
-    aligned_main, maximum = prealign_torch(flat, config.extra_bits, config.mxu_rows)
+    aligned_main, maximum = prealign_torch(
+        flat,
+        config.extra_bits,
+        config.mxu_rows,
+        config.mantissa_bits,
+        config.exponent_bits,
+    )
     has_zero = bool(zero.any()) if has_zero is None else has_zero
     aligned_reduce = None
     if has_zero:
         aligned_reduce, _ = prealign_torch(
-            flat, config.reduce_extra_bits, config.mxu_rows
+            flat,
+            config.reduce_extra_bits,
+            config.mxu_rows,
+            config.mantissa_bits,
+            config.exponent_bits,
         )
 
     padded_k = aligned_main.shape[1]
@@ -124,14 +150,14 @@ def qcol_real_2scomp_torch(
         padded_weight = weight
     accumulator = torch.zeros((rows, n), dtype=torch.float32, device=activation.device)
     shift_back = config.extra_bits - config.reduce_extra_bits
-    binary_scale_exponent = -(_FP16_MANTISSA_BITS + config.extra_bits)
+    binary_scale_exponent = -(config.mantissa_bits + config.extra_bits)
 
     for tile in range(config.tile_count(k)):
         start = tile * config.mxu_rows
         end = start + config.mxu_rows
         group = config.group_for_tile(tile, k)
         a_tile = aligned_main[:, start:end].to(torch.float64)
-        exponent = maximum[:, tile].to(torch.int32) - _FP16_EXP_BIAS
+        exponent = maximum[:, tile].to(torch.int32) - config.exponent_bias
         factor = torch.ldexp(
             torch.ones(rows, device=activation.device, dtype=torch.float64),
             exponent + binary_scale_exponent,
@@ -160,7 +186,7 @@ def qcol_real_2scomp_torch(
             scaled = restored * scale[n0:n1, group].to(torch.float32)[None, :]
             accumulator[:, n0:n1] = accumulator[:, n0:n1] + scaled
 
-    output = accumulator.to(torch.float16)
+    output = accumulator.to(activation.dtype)
     if bias is not None:
         output = output + bias
     return output.reshape(*original_shape, n)

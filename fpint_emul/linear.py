@@ -11,8 +11,10 @@ def dequantize_weight(
     scale: torch.Tensor,
     zero: torch.Tensor,
     config: FpIntConfig,
+    *,
+    dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    """Expand compact QCOL parameters and dequantize to FP16 [N, K]."""
+    """Expand compact QCOL parameters and dequantize to the requested dtype."""
 
     if weight.ndim != 2:
         raise ValueError("weight must have shape [N, K]")
@@ -22,7 +24,7 @@ def dequantize_weight(
     return (
         (weight.to(torch.int32) - zero[:, group_index].to(torch.int32))
         * scale[:, group_index].to(torch.float32)
-    ).to(torch.float16)
+    ).to(dtype)
 
 
 def fpint_linear(
@@ -51,7 +53,7 @@ def fpint_linear(
     if backend == "standard":
         return torch.nn.functional.linear(
             activation,
-            dequantize_weight(weight, scale, zero, config),
+            dequantize_weight(weight, scale, zero, config, dtype=activation.dtype),
             bias,
         )
     if backend == "fpint_cuda":

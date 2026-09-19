@@ -255,6 +255,7 @@ def validate_model(
     group_size: int,
     mxu_rows: int,
     expected_linears: int,
+    compute_dtype: str = "fp16",
 ) -> dict[str, Any]:
     wrappers = fpint_wrappers(model)
     if len(wrappers) != expected_linears:
@@ -262,6 +263,7 @@ def validate_model(
             f"expected {expected_linears} FPINT Linear layers, found {len(wrappers)}"
         )
     invalid = {}
+    expected_dtype = torch.float16 if compute_dtype == "fp16" else torch.bfloat16
     for name, wrapper in wrappers.items():
         version, observed_bits, observed_group, observed_mxu, _, _ = (
             wrapper.fpint_meta.tolist()
@@ -272,10 +274,24 @@ def validate_model(
             or observed_group != group_size
             or observed_mxu != mxu_rows
             or wrapper.linear_backend != backend
+            or wrapper.module.weight.dtype != expected_dtype
+            or (
+                backend != "standard"
+                and (
+                    wrapper._fpint_config is None
+                    or wrapper._fpint_config.activation_format != compute_dtype
+                )
+            )
         ):
             invalid[name] = {
                 "meta": wrapper.fpint_meta.tolist(),
                 "backend": wrapper.linear_backend,
+                "weight_dtype": str(wrapper.module.weight.dtype),
+                "activation_format": (
+                    None
+                    if wrapper._fpint_config is None
+                    else wrapper._fpint_config.activation_format
+                ),
             }
     if invalid:
         raise ValueError(f"invalid FPINT layer configuration: {invalid}")
@@ -296,6 +312,7 @@ def validate_model(
             "unknown",
         ),
         "fallbacks": fallbacks,
+        "compute_dtype": compute_dtype,
     }
 
 
@@ -373,6 +390,7 @@ def load_condition(args: argparse.Namespace, backend: str):
         q_bits=16,
         p_bits=16,
         attention_backend="eager",
+        compute_dtype=args.compute_dtype,
     )
     model.config.use_cache = False
     return model.eval(), tokenizer
@@ -397,6 +415,7 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
         group_size=args.group_size,
         mxu_rows=args.mxu_rows,
         expected_linears=args.expected_fpint_linears,
+        compute_dtype=args.compute_dtype,
     )
     fpint_config = validate_model(
         fpint_model,
@@ -405,6 +424,7 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
         group_size=args.group_size,
         mxu_rows=args.mxu_rows,
         expected_linears=args.expected_fpint_linears,
+        compute_dtype=args.compute_dtype,
     )
     tokenizer.model_max_length = 1_000_000_000
 
@@ -518,6 +538,12 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
             "extra_bits": args.extra_bits,
             "reduce_extra_bits": args.reduce_extra_bits,
             "activation_query_key_value_probability_bits": 16,
+            "compute_dtype": args.compute_dtype,
+            "rotation_optimization_dtype": args.rotation_optimization_dtype,
+            "activation_dtype": args.compute_dtype,
+            "output_dtype": args.compute_dtype,
+            "scale_dtype": "fp16",
+            "accumulator_dtype": "fp32",
             "attention_backend": "eager",
             "standard_coverage": standard_config,
             "fpint_coverage": fpint_config,
@@ -579,6 +605,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mxu-rows", type=int, default=128)
     parser.add_argument("--extra-bits", type=int, default=19)
     parser.add_argument("--reduce-extra-bits", type=int, default=10)
+    parser.add_argument(
+        "--compute-dtype", choices=("fp16", "bf16"), default="fp16"
+    )
+    parser.add_argument(
+        "--rotation-optimization-dtype",
+        choices=("fp16", "bf16"),
+    )
     parser.add_argument("--sequence-length", type=int, default=2048)
     parser.add_argument("--max-documents", type=int)
     parser.add_argument("--max-tokens-per-document", type=int)
@@ -591,6 +624,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ear-top-k", type=int, default=10)
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
+    if args.rotation_optimization_dtype is None:
+        args.rotation_optimization_dtype = args.compute_dtype
     for name in (
         "input_model",
         "load_qmodel_path",

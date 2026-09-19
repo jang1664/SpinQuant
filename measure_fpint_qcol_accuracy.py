@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare conventional and FPINT FP16 outputs against a GPU FP64 reference."""
+"""Compare conventional and FPINT 16-bit outputs against a GPU FP64 reference."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from fpint_emul import FpIntConfig, fpint_linear, qcol_real_2scomp_reference
 
 
 SAMPLER_VERSION = "k_scaled_finite_fp16_fields_v3"
+BF16_SAMPLER_VERSION = "k_scaled_finite_bf16_fields_v1"
 DEFAULT_K_VALUES = (128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768)
 DEFAULT_EXPONENT_MAX_BY_K = {
     128: 24,
@@ -30,6 +31,9 @@ DEFAULT_EXPONENT_MAX_BY_K = {
     8192: 21,
     16384: 21,
     32768: 20,
+}
+DEFAULT_BF16_EXPONENT_MAX_BY_K = {
+    k: exponent - 15 + 127 for k, exponent in DEFAULT_EXPONENT_MAX_BY_K.items()
 }
 FP16_SIGN_MIN = 0
 FP16_SIGN_MAX = 1
@@ -55,14 +59,14 @@ def parse_exponent_max_map(value: str) -> dict[int, int]:
             k_text, exponent_text = item.split(":", maxsplit=1)
             k = int(k_text)
             exponent = int(exponent_text)
-            if k <= 0 or not FP16_EXPONENT_MIN <= exponent <= 30:
+            if k <= 0 or not FP16_EXPONENT_MIN <= exponent <= 254:
                 raise ValueError
             if k in result:
                 raise ValueError
             result[k] = exponent
     except ValueError as error:
         raise argparse.ArgumentTypeError(
-            "expected unique K:EXP pairs with K > 0 and 0 <= EXP <= 30"
+            "expected unique K:EXP pairs with K > 0 and 0 <= EXP <= 254"
         ) from error
     if not result:
         raise argparse.ArgumentTypeError("at least one K:EXP pair is required")
@@ -105,14 +109,38 @@ def sample_finite_fp16_fields(
     return values
 
 
-def activation_field_stats(activation: np.ndarray) -> dict[str, int]:
-    bits = np.ascontiguousarray(activation).view(np.uint16)
+def sample_finite_bf16_fields(
+    rng: np.random.Generator,
+    shape: tuple[int, ...],
+    exponent_max: int,
+) -> torch.Tensor:
+    """Uniformly sample independent finite IEEE BF16 fields on CPU."""
+
+    if not 0 <= exponent_max <= 254:
+        raise ValueError("exponent_max must be in [0, 254]")
+    sign = rng.integers(0, 2, size=shape, dtype=np.uint16)
+    exponent = rng.integers(0, exponent_max + 1, size=shape, dtype=np.uint16)
+    mantissa = rng.integers(0, 128, size=shape, dtype=np.uint16)
+    bits = (sign << np.uint16(15)) | (exponent << np.uint16(7)) | mantissa
+    values = torch.from_numpy(np.ascontiguousarray(bits)).view(torch.bfloat16)
+    if not bool(torch.isfinite(values).all()):
+        raise AssertionError("finite BF16 field sampler produced NaN or Inf")
+    return values
+
+
+def activation_field_stats(activation) -> dict[str, int]:
+    if isinstance(activation, torch.Tensor):
+        bits = activation.contiguous().view(torch.uint16).numpy()
+        numeric_zeros = int((activation == 0).sum().item())
+    else:
+        bits = np.ascontiguousarray(activation).view(np.uint16)
+        numeric_zeros = int((activation == 0).sum())
     negative = int(((bits >> np.uint16(15)) != 0).sum())
     return {
         "activation_elements": int(bits.size),
         "positive_sign_bits": int(bits.size - negative),
         "negative_sign_bits": negative,
-        "numeric_zeros": int((activation == 0).sum()),
+        "numeric_zeros": numeric_zeros,
     }
 
 
@@ -124,14 +152,17 @@ def make_case(
     config: FpIntConfig,
     seed: int,
     exponent_max: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+):
     seed_sequence = np.random.SeedSequence(seed)
     activation_rng, weight_rng = [
         np.random.default_rng(child) for child in seed_sequence.spawn(2)
     ]
-    activation = sample_finite_fp16_fields(
-        activation_rng, (m, k), exponent_max
+    sampler = (
+        sample_finite_fp16_fields
+        if config.activation_format == "fp16"
+        else sample_finite_bf16_fields
     )
+    activation = sampler(activation_rng, (m, k), exponent_max)
     qmin = -(1 << (config.weight_bits - 1))
     qmax = (1 << (config.weight_bits - 1)) - 1
     weight = weight_rng.integers(
@@ -156,9 +187,9 @@ def fp64_reference_linear(
 def conventional_linear(
     activation: torch.Tensor, weight: torch.Tensor
 ) -> torch.Tensor:
-    """Actual FP16 Linear after converting only the integer weight to FP16."""
+    """Actual GPU Linear after converting integer weight to activation dtype."""
 
-    return torch.nn.functional.linear(activation, weight.to(torch.float16))
+    return torch.nn.functional.linear(activation, weight.to(activation.dtype))
 
 
 def qcol_allclose_metrics(
@@ -192,46 +223,61 @@ def qcol_allclose_metrics(
     }
 
 
-def _ordered_fp16(values: torch.Tensor) -> torch.Tensor:
-    """Map finite FP16 values to monotonically ordered integer coordinates."""
+def _ordered_float16(values: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Map finite FP16/BF16 values to monotonic integer coordinates."""
 
-    values = values.to(dtype=torch.float16, device="cpu").contiguous()
+    values = values.to(dtype=dtype, device="cpu").contiguous()
     if not bool(torch.isfinite(values).all()):
-        raise ValueError("FP16 ULP distance requires finite values")
+        raise ValueError("ULP distance requires finite values")
     bits = values.view(torch.int16).to(torch.int32) & 0xFFFF
     magnitude = bits & 0x7FFF
     negative = (bits & 0x8000) != 0
     return torch.where(negative, 0x8000 - magnitude, 0x8000 + magnitude)
 
 
-def fp16_ulp_distance(actual: torch.Tensor, expected: torch.Tensor) -> torch.Tensor:
+def float16_ulp_distance(
+    actual: torch.Tensor, expected: torch.Tensor, dtype: torch.dtype
+) -> torch.Tensor:
     if actual.shape != expected.shape:
         raise ValueError(
             f"shape mismatch: {tuple(actual.shape)} != {tuple(expected.shape)}"
         )
-    return (_ordered_fp16(actual) - _ordered_fp16(expected)).abs().to(torch.int32)
+    return (
+        _ordered_float16(actual, dtype) - _ordered_float16(expected, dtype)
+    ).abs().to(torch.int32)
+
+
+def fp16_ulp_distance(actual: torch.Tensor, expected: torch.Tensor) -> torch.Tensor:
+    """Backward-compatible FP16 ULP helper."""
+
+    return float16_ulp_distance(actual, expected, torch.float16)
 
 
 def _candidate_error_metrics(
     candidate: torch.Tensor,
     reference_fp64: torch.Tensor,
-    reference_fp16: torch.Tensor,
+    rounded_reference: torch.Tensor,
     common_finite: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
 ) -> dict[str, Any]:
     elements = int(common_finite.sum().item())
     if not elements:
         return {
             "elements": 0,
             "rmse": None,
+            "relative_l2_error": None,
+            "max_abs_error": None,
             "signed_error_mean": None,
             "signed_error_std": None,
             "mean_ulp": None,
             "std_ulp": None,
             "p50_ulp": None,
             "p95_ulp": None,
+            "p99_ulp": None,
             "max_ulp": None,
             "error_sum": 0.0,
             "squared_error_sum": 0.0,
+            "reference_squared_sum": 0.0,
             "ulp_sum": 0.0,
             "squared_ulp_sum": 0.0,
         }
@@ -241,11 +287,12 @@ def _candidate_error_metrics(
     signed_error = candidate_values - reference_values
     error_sum = float(signed_error.sum().item())
     squared_error_sum = float(signed_error.square().sum().item())
+    reference_squared_sum = float(reference_values.square().sum().item())
     error_mean = error_sum / elements
     error_variance = max(squared_error_sum / elements - error_mean**2, 0.0)
 
-    ulp = fp16_ulp_distance(
-        candidate[common_finite], reference_fp16[common_finite]
+    ulp = float16_ulp_distance(
+        candidate[common_finite], rounded_reference[common_finite], output_dtype
     ).double()
     ulp_sum = float(ulp.sum().item())
     squared_ulp_sum = float(ulp.square().sum().item())
@@ -255,15 +302,20 @@ def _candidate_error_metrics(
     return {
         "elements": elements,
         "rmse": math.sqrt(squared_error_sum / elements),
+        "relative_l2_error": math.sqrt(squared_error_sum)
+        / max(math.sqrt(reference_squared_sum), 1e-300),
+        "max_abs_error": float(signed_error.abs().max().item()),
         "signed_error_mean": error_mean,
         "signed_error_std": math.sqrt(error_variance),
         "mean_ulp": ulp_mean,
         "std_ulp": math.sqrt(ulp_variance),
         "p50_ulp": float(np.percentile(ulp_numpy, 50)),
         "p95_ulp": float(np.percentile(ulp_numpy, 95)),
+        "p99_ulp": float(np.percentile(ulp_numpy, 99)),
         "max_ulp": int(ulp.max().item()),
         "error_sum": error_sum,
         "squared_error_sum": squared_error_sum,
+        "reference_squared_sum": reference_squared_sum,
         "ulp_sum": ulp_sum,
         "squared_ulp_sum": squared_ulp_sum,
     }
@@ -273,22 +325,24 @@ def paired_error_metrics(
     conventional: torch.Tensor,
     fp_int: torch.Tensor,
     reference_fp64: torch.Tensor,
+    activation_format: str = "fp16",
 ) -> dict[str, Any]:
     """Compute both errors on one shared finite-output mask."""
 
-    conventional = conventional.detach().to(dtype=torch.float16, device="cpu")
-    fp_int = fp_int.detach().to(dtype=torch.float16, device="cpu")
+    output_dtype = torch.float16 if activation_format == "fp16" else torch.bfloat16
+    conventional = conventional.detach().to(dtype=output_dtype, device="cpu")
+    fp_int = fp_int.detach().to(dtype=output_dtype, device="cpu")
     reference_fp64 = reference_fp64.detach().to(dtype=torch.float64, device="cpu")
     if conventional.shape != fp_int.shape or conventional.shape != reference_fp64.shape:
         raise ValueError("conventional, FPINT and FP64 outputs must have the same shape")
-    reference_fp16 = reference_fp64.to(torch.float16)
+    rounded_reference = reference_fp64.to(output_dtype)
     reference_fp64_finite = torch.isfinite(reference_fp64)
-    reference_fp16_finite = torch.isfinite(reference_fp16)
+    rounded_reference_finite = torch.isfinite(rounded_reference)
     conventional_finite = torch.isfinite(conventional)
     fp_int_finite = torch.isfinite(fp_int)
     common_finite = (
         reference_fp64_finite
-        & reference_fp16_finite
+        & rounded_reference_finite
         & conventional_finite
         & fp_int_finite
     )
@@ -297,8 +351,9 @@ def paired_error_metrics(
     coverage = {
         "output_elements": total,
         "fp64_reference_nonfinite": int((~reference_fp64_finite).sum().item()),
-        "fp16_rounded_reference_nonfinite": int(
-            (~reference_fp16_finite).sum().item()
+        "rounded_reference_nonfinite": int((~rounded_reference_finite).sum().item()),
+        f"{activation_format}_rounded_reference_nonfinite": int(
+            (~rounded_reference_finite).sum().item()
         ),
         "conventional_nonfinite": int((~conventional_finite).sum().item()),
         "fp_int_nonfinite": int((~fp_int_finite).sum().item()),
@@ -308,10 +363,14 @@ def paired_error_metrics(
     return {
         "coverage": coverage,
         "conventional_err": _candidate_error_metrics(
-            conventional, reference_fp64, reference_fp16, common_finite
+            conventional,
+            reference_fp64,
+            rounded_reference,
+            common_finite,
+            output_dtype,
         ),
         "fp_int_err": _candidate_error_metrics(
-            fp_int, reference_fp64, reference_fp16, common_finite
+            fp_int, reference_fp64, rounded_reference, common_finite, output_dtype
         ),
     }
 
@@ -333,6 +392,7 @@ def _aggregate_error(rows: list[dict[str, Any]]) -> dict[str, Any]:
     elements = sum(row["elements"] for row in valid)
     error_sum = sum(row["error_sum"] for row in valid)
     squared_error_sum = sum(row["squared_error_sum"] for row in valid)
+    reference_squared_sum = sum(row["reference_squared_sum"] for row in valid)
     ulp_sum = sum(row["ulp_sum"] for row in valid)
     squared_ulp_sum = sum(row["squared_ulp_sum"] for row in valid)
     if elements:
@@ -341,6 +401,9 @@ def _aggregate_error(rows: list[dict[str, Any]]) -> dict[str, Any]:
         global_metrics = {
             "elements": elements,
             "global_rmse": math.sqrt(squared_error_sum / elements),
+            "global_relative_l2_error": math.sqrt(squared_error_sum)
+            / max(math.sqrt(reference_squared_sum), 1e-300),
+            "global_max_abs_error": max(row["max_abs_error"] for row in valid),
             "global_signed_error_mean": error_mean,
             "global_signed_error_std": math.sqrt(
                 max(squared_error_sum / elements - error_mean**2, 0.0)
@@ -355,6 +418,8 @@ def _aggregate_error(rows: list[dict[str, Any]]) -> dict[str, Any]:
         global_metrics = {
             "elements": 0,
             "global_rmse": None,
+            "global_relative_l2_error": None,
+            "global_max_abs_error": None,
             "global_signed_error_mean": None,
             "global_signed_error_std": None,
             "global_mean_ulp": None,
@@ -401,8 +466,15 @@ def summarize_records(
             "fp64_reference_nonfinite": sum(
                 row["fp64_reference_nonfinite"] for row in coverage_rows
             ),
-            "fp16_rounded_reference_nonfinite": sum(
-                row["fp16_rounded_reference_nonfinite"] for row in coverage_rows
+            "rounded_reference_nonfinite": sum(
+                row.get(
+                    "rounded_reference_nonfinite",
+                    row.get(
+                        "fp16_rounded_reference_nonfinite",
+                        row.get("bf16_rounded_reference_nonfinite", 0),
+                    ),
+                )
+                for row in coverage_rows
             ),
             "conventional_nonfinite": sum(
                 row["conventional_nonfinite"] for row in coverage_rows
@@ -506,12 +578,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"exponent map must exactly match K values; missing={sorted(missing)}, "
             f"extra={sorted(extra)}"
         )
+    activation_format = getattr(args, "activation_format", "fp16")
     config = FpIntConfig(
         weight_bits=args.bits,
         group_size=args.group_size,
         mxu_rows=args.mxu_rows,
         extra_bits=args.extra_bits,
         reduce_extra_bits=args.reduce_extra_bits,
+        activation_format=activation_format,
     )
     records: list[dict[str, Any]] = []
     all_reference_close = True
@@ -539,13 +613,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             all_signs_present &= signs_present
 
             qcol_reference = torch.from_numpy(
-                qcol_real_2scomp_reference(
-                    activation, weight, scale, zero, config
-                )
+                qcol_real_2scomp_reference(activation, weight, scale, zero, config)
             )
-            tensors = tuple(
-                torch.from_numpy(value).to(device)
-                for value in (activation, weight, scale, zero)
+            activation_tensor = (
+                activation.to(device)
+                if isinstance(activation, torch.Tensor)
+                else torch.from_numpy(activation).to(device)
+            )
+            tensors = (
+                activation_tensor,
+                torch.from_numpy(weight).to(device),
+                torch.from_numpy(scale).to(device),
+                torch.from_numpy(zero).to(device),
             )
             actual_torch = fpint_linear(
                 *tensors, config, backend="fpint_torch", has_zero=False
@@ -571,7 +650,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             reference_fp64 = fp64_reference_linear(tensors[0], tensors[1])
             conventional = conventional_linear(tensors[0], tensors[1])
             numerical = paired_error_metrics(
-                conventional, actual_fp_int, reference_fp64
+                conventional,
+                actual_fp_int,
+                reference_fp64,
+                activation_format=activation_format,
             )
             comparisons["conventional_err"] = numerical["conventional_err"]
             comparisons["fp_int_err"] = numerical["fp_int_err"]
@@ -625,6 +707,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "allow_fp16_reduced_precision_reduction": (
                 torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
             ),
+            "allow_bf16_reduced_precision_reduction": (
+                torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+            ),
             "device": torch.cuda.get_device_name(device)
             if device.type == "cuda"
             else str(device),
@@ -632,8 +717,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         },
         "config": {
             **vars(config),
-            "sampler_version": SAMPLER_VERSION,
-            "operation": "raw_fp16_times_signed_int",
+            "sampler_version": (
+                SAMPLER_VERSION
+                if activation_format == "fp16"
+                else BF16_SAMPLER_VERSION
+            ),
+            "operation": f"raw_{activation_format}_times_signed_int",
             "identity_scale": 1.0,
             "zero_point": 0,
             "m": args.m,
@@ -644,13 +733,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "base_seed": args.base_seed,
             "k_values": list(args.k_values),
             "finite_target": args.finite_target,
-            "fp16_fields": {
+            f"{activation_format}_fields": {
                 "sign": [FP16_SIGN_MIN, FP16_SIGN_MAX],
                 "exponent_min": FP16_EXPONENT_MIN,
                 "exponent_max_by_k": {
                     str(k): exponent_max_by_k[k] for k in args.k_values
                 },
-                "mantissa": [FP16_MANTISSA_MIN, FP16_MANTISSA_MAX],
+                "mantissa": [0, (1 << config.mantissa_bits) - 1],
                 "sampling": "independent_uniform_raw_fields",
             },
             "integer_range": [
@@ -659,7 +748,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ],
             "paths": {
                 "fp64_reference": "FP64 activation x FP64-cast integer weight",
-                "conventional": "FP16 activation x FP16-cast integer weight",
+                "conventional": (
+                    f"{activation_format.upper()} activation x "
+                    f"{activation_format.upper()}-cast integer weight"
+                ),
                 "fp_int": "QCOL_REAL_2SCOMP FPINT CUDA emulation",
             },
         },
@@ -675,6 +767,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mxu-rows", type=int, default=128)
     parser.add_argument("--extra-bits", type=int, default=19)
     parser.add_argument("--reduce-extra-bits", type=int, default=10)
+    parser.add_argument(
+        "--activation-format", choices=("fp16", "bf16"), default="fp16"
+    )
     parser.add_argument("--m", type=int, default=32)
     parser.add_argument("--n", type=int, default=32)
     parser.add_argument("--k-values", type=parse_int_list, default=DEFAULT_K_VALUES)
@@ -682,7 +777,7 @@ def parse_args() -> argparse.Namespace:
         "--exp-max-by-k",
         dest="exponent_max_by_k",
         type=parse_exponent_max_map,
-        default=DEFAULT_EXPONENT_MAX_BY_K,
+        default=None,
     )
     parser.add_argument("--finite-target", type=float, default=0.999)
     parser.add_argument("--trials", type=int, default=30)
@@ -692,6 +787,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.exponent_max_by_k is None:
+        args.exponent_max_by_k = (
+            DEFAULT_EXPONENT_MAX_BY_K
+            if args.activation_format == "fp16"
+            else DEFAULT_BF16_EXPONENT_MAX_BY_K
+        )
     if args.m <= 0 or args.n <= 0 or args.trials <= 0:
         parser.error("--m, --n and --trials must be positive")
     if args.atol < 0 or args.rtol < 0:

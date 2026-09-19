@@ -15,5 +15,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def(
       "qcol_real_2scomp",
       &fpint_qcol_cuda,
-      "QCOL_REAL_2SCOMP FP16 x INT CUDA forward");
+      "QCOL_REAL_2SCOMP FP16/BF16 x INT CUDA forward");
 }

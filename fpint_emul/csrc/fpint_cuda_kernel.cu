@@ -1,6 +1,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <torch/extension.h>
 
@@ -12,33 +13,77 @@ constexpr int kBlockN = 32;
 constexpr int kBlockM = 4;
 constexpr int kReductionLanes = 4;
 constexpr int kThreadsPerBlock = kBlockN * kBlockM * kReductionLanes;
-constexpr int kMantissaBits = 10;
-constexpr int kExponentBias = 15;
+template <typename scalar_t>
+__device__ __forceinline__ unsigned scalar_bits(const scalar_t value);
 
-__device__ __forceinline__ int fp16_exponent(const __half value) {
-  return (__half_as_ushort(value) >> 10) & 0x1f;
+template <>
+__device__ __forceinline__ unsigned scalar_bits<__half>(const __half value) {
+  return __half_as_ushort(value);
 }
 
-__device__ __forceinline__ int64_t align_fp16(
-    const __half value, const int maximum_exponent, const int extra_bits) {
-  const unsigned bits = __half_as_ushort(value);
+template <>
+__device__ __forceinline__ unsigned scalar_bits<__nv_bfloat16>(
+    const __nv_bfloat16 value) {
+  return __bfloat16_as_ushort(value);
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t scalar_zero();
+
+template <>
+__device__ __forceinline__ __half scalar_zero<__half>() {
+  return __float2half(0.0f);
+}
+
+template <>
+__device__ __forceinline__ __nv_bfloat16 scalar_zero<__nv_bfloat16>() {
+  return __float2bfloat16_rn(0.0f);
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t scalar_from_float(const float value);
+
+template <>
+__device__ __forceinline__ __half scalar_from_float<__half>(const float value) {
+  return __float2half_rn(value);
+}
+
+template <>
+__device__ __forceinline__ __nv_bfloat16 scalar_from_float<__nv_bfloat16>(
+    const float value) {
+  return __float2bfloat16_rn(value);
+}
+
+template <typename scalar_t, int kMantissaBits, int kExponentBits>
+__device__ __forceinline__ int scalar_exponent(const scalar_t value) {
+  return (scalar_bits(value) >> kMantissaBits) & ((1 << kExponentBits) - 1);
+}
+
+template <typename scalar_t, int kMantissaBits, int kExponentBits>
+__device__ __forceinline__ int64_t align_scalar(
+    const scalar_t value, const int maximum_exponent, const int extra_bits) {
+  const unsigned bits = scalar_bits(value);
   const bool negative = (bits >> 15) != 0;
-  const int exponent = (bits >> 10) & 0x1f;
+  const int exponent =
+      (bits >> kMantissaBits) & ((1 << kExponentBits) - 1);
   const int exponent_for_align = exponent == 0 ? 1 : exponent;
   const int64_t hidden =
       (static_cast<int64_t>(exponent != 0) << kMantissaBits) |
-      static_cast<int64_t>(bits & 0x3ff);
+      static_cast<int64_t>(bits & ((1 << kMantissaBits) - 1));
   const int shift = maximum_exponent - exponent_for_align;
-  const int64_t aligned = (hidden << extra_bits) >> shift;
+  const int64_t shifted = hidden << extra_bits;
+  const int64_t aligned = shift >= 63 ? 0 : shifted >> shift;
   return negative ? -aligned : aligned;
 }
 
+template <typename scalar_t, int kMantissaBits, int kExponentBits,
+          int kExponentBias>
 __global__ void fpint_qcol_kernel(
-    const __half* __restrict__ activation,
+    const scalar_t* __restrict__ activation,
     const int8_t* __restrict__ weight,
     const __half* __restrict__ scale,
     const int32_t* __restrict__ zero,
-    __half* __restrict__ output,
+    scalar_t* __restrict__ output,
     const int rows,
     const int n_columns,
     const int k_columns,
@@ -78,7 +123,8 @@ __global__ void fpint_qcol_kernel(
           const int k = tile_start + offset;
           if (k < k_columns) {
             int exponent =
-                fp16_exponent(activation[global_row * k_columns + k]);
+                scalar_exponent<scalar_t, kMantissaBits, kExponentBits>(
+                    activation[global_row * k_columns + k]);
             exponent = exponent == 0 ? 1 : exponent;
             local_maximum = max(local_maximum, exponent);
           }
@@ -101,15 +147,19 @@ __global__ void fpint_qcol_kernel(
       const int offset = index - activation_row * mxu_rows;
       const int global_row = blockIdx.y * kBlockM + activation_row;
       const int k = tile_start + offset;
-      const __half value =
+      const scalar_t value =
           (global_row < rows && k < k_columns)
           ? activation[global_row * k_columns + k]
-          : __float2half(0.0f);
+          : scalar_zero<scalar_t>();
       shared_main[index] =
-          align_fp16(value, maximum_exponents[activation_row], extra_bits);
+          align_scalar<scalar_t, kMantissaBits, kExponentBits>(
+              value, maximum_exponents[activation_row], extra_bits);
       if (has_zero) {
-        shared_reduce[index] = align_fp16(
-            value, maximum_exponents[activation_row], reduce_extra_bits);
+        shared_reduce[index] =
+            align_scalar<scalar_t, kMantissaBits, kExponentBits>(
+                value,
+                maximum_exponents[activation_row],
+                reduce_extra_bits);
       }
     }
     for (int index = thread; index < kBlockN * mxu_rows;
@@ -171,7 +221,7 @@ __global__ void fpint_qcol_kernel(
   }
 
   if (reduction_lane == 0 && row < rows && column < n_columns) {
-    output[row * n_columns + column] = __float2half_rn(accumulator);
+    output[row * n_columns + column] = scalar_from_float<scalar_t>(accumulator);
   }
 }
 
@@ -190,7 +240,10 @@ torch::Tensor fpint_qcol_cuda(
   TORCH_CHECK(activation.is_cuda(), "activation must be CUDA");
   TORCH_CHECK(weight.is_cuda() && scale.is_cuda() && zero.is_cuda(),
               "all FPINT tensors must be CUDA");
-  TORCH_CHECK(activation.scalar_type() == at::kHalf, "activation must be FP16");
+  TORCH_CHECK(
+      activation.scalar_type() == at::kHalf ||
+          activation.scalar_type() == at::kBFloat16,
+      "activation must be FP16 or BF16");
   TORCH_CHECK(weight.scalar_type() == at::kChar, "weight must be int8");
   TORCH_CHECK(scale.scalar_type() == at::kHalf, "scale must be FP16");
   TORCH_CHECK(zero.scalar_type() == at::kInt, "zero must be int32");
@@ -227,21 +280,43 @@ torch::Tensor fpint_qcol_cuda(
       aligned_arrays * kBlockM * mxu_rows * sizeof(int64_t) +
       kBlockN * mxu_rows * sizeof(int8_t);
   auto stream = at::cuda::getCurrentCUDAStream(activation.device().index());
-  fpint_qcol_kernel<<<grid, block, shared_memory, stream>>>(
-      reinterpret_cast<const __half*>(activation.data_ptr<at::Half>()),
-      weight.data_ptr<int8_t>(),
-      reinterpret_cast<const __half*>(scale.data_ptr<at::Half>()),
-      zero.data_ptr<int32_t>(),
-      reinterpret_cast<__half*>(output.data_ptr<at::Half>()),
-      static_cast<int>(rows),
-      static_cast<int>(n),
-      static_cast<int>(k),
-      static_cast<int>(group_size),
-      static_cast<int>(scale.size(1)),
-      static_cast<int>(mxu_rows),
-      static_cast<int>(extra_bits),
-      static_cast<int>(reduce_extra_bits),
-      has_zero);
+  if (activation.scalar_type() == at::kHalf) {
+    fpint_qcol_kernel<__half, 10, 5, 15>
+        <<<grid, block, shared_memory, stream>>>(
+            reinterpret_cast<const __half*>(activation.data_ptr<at::Half>()),
+            weight.data_ptr<int8_t>(),
+            reinterpret_cast<const __half*>(scale.data_ptr<at::Half>()),
+            zero.data_ptr<int32_t>(),
+            reinterpret_cast<__half*>(output.data_ptr<at::Half>()),
+            static_cast<int>(rows),
+            static_cast<int>(n),
+            static_cast<int>(k),
+            static_cast<int>(group_size),
+            static_cast<int>(scale.size(1)),
+            static_cast<int>(mxu_rows),
+            static_cast<int>(extra_bits),
+            static_cast<int>(reduce_extra_bits),
+            has_zero);
+  } else {
+    fpint_qcol_kernel<__nv_bfloat16, 7, 8, 127>
+        <<<grid, block, shared_memory, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(
+                activation.data_ptr<at::BFloat16>()),
+            weight.data_ptr<int8_t>(),
+            reinterpret_cast<const __half*>(scale.data_ptr<at::Half>()),
+            zero.data_ptr<int32_t>(),
+            reinterpret_cast<__nv_bfloat16*>(
+                output.data_ptr<at::BFloat16>()),
+            static_cast<int>(rows),
+            static_cast<int>(n),
+            static_cast<int>(k),
+            static_cast<int>(group_size),
+            static_cast<int>(scale.size(1)),
+            static_cast<int>(mxu_rows),
+            static_cast<int>(extra_bits),
+            static_cast<int>(reduce_extra_bits),
+            has_zero);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 }

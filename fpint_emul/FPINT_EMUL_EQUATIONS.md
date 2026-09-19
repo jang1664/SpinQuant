@@ -1,23 +1,32 @@
 # FPINT GEMM Emulator 수식 정리
 
 이 문서는 `py/fpint_emul.py`의 계산을 발표 자료에서 설명할 수 있도록 수식으로 정리한 것이다.
-수식은 코드의 현재 동작을 기준으로 하며, 모든 FP16 입출력은 bit pattern으로 저장된다.
+수식은 코드의 현재 동작을 기준으로 하며, FP16 또는 BF16 입출력은
+16-bit pattern으로 저장된다. 아래 식에서 format별 상수는 다음과 같다.
+
+| Format | exponent bits | fraction bits $F$ | bias $b$ |
+|---|---:|---:|---:|
+| FP16 | 5 | 10 | 15 |
+| BF16 | 8 | 7 | 127 |
+
+Scale은 두 format 모두 FP16으로 저장하며 post-scale과 K-tile accumulation은
+FP32, 최종 출력은 activation format과 같은 dtype을 사용한다.
 
 ## 1. 표기법과 상수
 
 | 기호 | 코드 | 의미 |
 |---|---|---|
-| $X_{m,k}$ | `input_data[m, k]` | FP16 activation |
+| $X_{m,k}$ | `input_data[m, k]` | FP16 또는 BF16 activation |
 | $W_{k,n}$ | `weight_data[k, n]` | signed INT4 weight 또는 encoded weight |
 | $S$ | `scale_data` | FP16 scale |
 | $Z$ | `zero_data` | signed zero point |
-| $Y_{m,n}$ | `output_data[m, n]` | FP16 GEMM 결과 |
+| $Y_{m,n}$ | `output_data[m, n]` | activation과 같은 format의 GEMM 결과 |
 | $B$ | `QBLOCK` | quantization block 크기, $B=16$ |
 | $T$ | `MXU_K` | 내적 tile 크기, $T=16$ |
 | $P$ | `EXTRA_BIT` | main alignment 여유 비트, $P=19$ |
 | $R$ | `EXTRA_BIT_FOR_REDUCE` | reduction alignment 여유 비트, $R=10$ |
-| $b$ | `IN_EXP_BIAS` | FP16 exponent bias, $b=15$ |
-| $F$ | `IN_MAN_WIDTH` | FP16 fraction 비트 수, $F=10$ |
+| $b$ | format config | exponent bias, FP16 15 / BF16 127 |
+| $F$ | format config | fraction 비트 수, FP16 10 / BF16 7 |
 
 두 alignment 결과의 fractional-bit 차이는 다음과 같다.
 
@@ -49,20 +58,21 @@ $$
 \hat{x}=q\,2^{-n_f}=\frac{q}{2^{n_f}}
 $$
 
-## 3. FP16 분해와 값 복원
+## 3. FP16/BF16 분해와 값 복원
 
-16-bit FP16 bit pattern을 $u$라고 하면 sign, exponent, fraction은 다음과 같이 추출된다.
+16-bit floating-point pattern을 $u$, exponent width를 $E_w$라고 하면 sign,
+exponent, fraction은 다음과 같이 추출된다.
 
 $$
 s=(u\gg15)\mathbin{\&}1
 $$
 
 $$
-e=(u\gg10)\mathbin{\&}31
+e=(u\gg F)\mathbin{\&}(2^{E_w}-1)
 $$
 
 $$
-f=u\mathbin{\&}1023
+f=u\mathbin{\&}(2^F-1)
 $$
 
 hidden bit와 보정 exponent를 다음과 같이 정의한다.
@@ -78,16 +88,16 @@ $$
 \bar{e}=\max(e,1)
 $$
 
-11-bit significand integer는 다음과 같다.
+$(F+1)$-bit significand integer는 다음과 같다.
 
 $$
-H=h\,2^{10}+f
+H=h\,2^F+f
 $$
 
-따라서 finite FP16 값은 다음 식으로 표현할 수 있다.
+따라서 finite FP16/BF16 값은 다음 식으로 표현할 수 있다.
 
 $$
-x=(-1)^s H\,2^{\bar{e}-15-10}
+x=(-1)^s H\,2^{\bar{e}-b-F}
 $$
 
 이 표현은 normal과 subnormal을 하나의 식으로 다룬다.
@@ -118,8 +128,8 @@ $$
 정렬된 integer를 실수 영역으로 복원하는 scale factor는 다음과 같다.
 
 $$
-C(E,p)=2^{E-15}\,2^{-(10+p)}
-=2^{E-15-10-p}
+C(E,p)=2^{E-b}\,2^{-(F+p)}
+=2^{E-b-F-p}
 $$
 
 따라서 원래 activation의 근삿값은 다음과 같다.

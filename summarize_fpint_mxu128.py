@@ -47,10 +47,11 @@ def _coverage_is_valid(metadata: dict[str, Any], backend: str) -> bool:
 
 def _collect_results(
     payloads: list[dict[str, Any]], backend: str
-) -> tuple[dict[str, dict[str, Any]], str, float]:
+) -> tuple[dict[str, dict[str, Any]], str, float, str]:
     collected: dict[str, dict[str, Any]] = {}
     checkpoint_sha: str | None = None
     evaluation_seconds = 0.0
+    compute_dtype: str | None = None
     for payload in payloads:
         metadata = payload.get("spinquant_quantization", {})
         expected = {
@@ -67,6 +68,13 @@ def _collect_results(
         }
         if mismatches:
             raise ValueError(f"{backend} result metadata mismatch: {mismatches}")
+        observed_dtype = metadata.get("compute_dtype", "fp16")
+        if observed_dtype not in ("fp16", "bf16"):
+            raise ValueError(f"{backend} result has invalid compute dtype")
+        if compute_dtype is None:
+            compute_dtype = observed_dtype
+        elif compute_dtype != observed_dtype:
+            raise ValueError(f"{backend} shards use different compute dtypes")
         if not _coverage_is_valid(metadata, backend):
             raise ValueError(f"{backend} result has invalid Linear coverage")
         observed_sha = metadata.get("quantized_checkpoint_sha256")
@@ -108,21 +116,40 @@ def _collect_results(
     missing = set(TASK_METRICS) - set(collected)
     if missing:
         raise ValueError(f"missing {backend} tasks: {sorted(missing)}")
-    return collected, checkpoint_sha, evaluation_seconds
+    assert compute_dtype is not None
+    return collected, checkpoint_sha, evaluation_seconds, compute_dtype
 
 
 def aggregate_full_results(
     standard_payloads: list[dict[str, Any]],
     fpint_payloads: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    standard, standard_sha, standard_seconds = _collect_results(
+    standard, standard_sha, standard_seconds, standard_dtype = _collect_results(
         standard_payloads, "standard"
     )
-    fpint, fpint_sha, fpint_seconds = _collect_results(
+    fpint, fpint_sha, fpint_seconds, fpint_dtype = _collect_results(
         fpint_payloads, "fpint_cuda"
     )
     if standard_sha != fpint_sha:
         raise ValueError("standard and FPINT results use different checkpoints")
+    if standard_dtype != fpint_dtype:
+        raise ValueError("standard and FPINT results use different compute dtypes")
+    standard_metadata = standard_payloads[0]["spinquant_quantization"]
+    fpint_metadata = fpint_payloads[0]["spinquant_quantization"]
+    shared_metadata_keys = (
+        "model",
+        "rotation_checkpoint_sha256",
+        "rotation_optimization_dtype",
+        "scale_dtype",
+        "accumulator_dtype",
+    )
+    experiment_metadata = {}
+    for key in shared_metadata_keys:
+        standard_value = standard_metadata.get(key)
+        fpint_value = fpint_metadata.get(key)
+        if standard_value != fpint_value:
+            raise ValueError(f"standard and FPINT metadata differ for {key}")
+        experiment_metadata[key] = standard_value
 
     tasks: dict[str, Any] = {}
     standard_correct = 0.0
@@ -178,6 +205,8 @@ def aggregate_full_results(
         "status": "complete",
         "quality_gate": None,
         "checkpoint_sha256": standard_sha,
+        "compute_dtype": standard_dtype,
+        "experiment_metadata": experiment_metadata,
         "tasks": tasks,
         "accuracy_micro": {
             "samples": accuracy_samples,
@@ -201,7 +230,9 @@ def render_report(random: dict[str, Any]) -> str:
     config = random["config"]
     summary = random["summary"]
     overall = summary["overall"]
-    fields = config["fp16_fields"]
+    activation_format = config.get("activation_format", "fp16")
+    fields = config[f"{activation_format}_fields"]
+    format_label = activation_format.upper()
     exp_by_k = fields["exponent_max_by_k"]
     lines = [
         "# MXU ROW 128 FP64-reference FP×INT 오차 비교",
@@ -213,20 +244,20 @@ def render_report(random: dict[str, Any]) -> str:
         f"- K: {', '.join(str(value) for value in config['k_values'])}",
         f"- Trials: {config['trials']}",
         f"- Finite target per K: {number(config['finite_target'])}",
-        f"- FP16 raw field uniform sampling: sign {fields['sign']}, "
+        f"- {format_label} raw field uniform sampling: sign {fields['sign']}, "
         f"exponent min {fields['exponent_min']}, mantissa {fields['mantissa']}",
         f"- Signed INT{config['weight_bits']} uniform sampling: {config['integer_range']}",
         "- Scale=1, zero-point=0 (raw FP×INT)",
         f"- MXU row / group size: {config['mxu_rows']} / {config['group_size']}",
         "- FP64 reference: FP64 activation × FP64-cast integer weight on GPU",
-        "- Conventional: FP16 activation × FP16-cast integer weight on GPU",
+        f"- Conventional: {format_label} activation × {format_label}-cast integer weight on GPU",
         "- FPINT: QCOL_REAL_2SCOMP CUDA emulation",
-        "- RMSE는 unrounded FP64 reference, ULP는 correctly-rounded FP16 reference 기준",
+        f"- RMSE는 unrounded FP64 reference, ULP는 correctly-rounded {format_label} reference 기준",
         "- 세 output이 모두 finite인 common mask에서 두 error를 paired 비교",
         "",
         "## Finite coverage",
         "",
-        "| K | EXP max | Common finite | Fraction | FP16-ref non-finite | Conventional non-finite | FPINT non-finite | Target |",
+        f"| K | EXP max | Common finite | Fraction | {format_label}-ref non-finite | Conventional non-finite | FPINT non-finite | Target |",
         "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |",
     ]
     for k in config["k_values"]:
@@ -235,16 +266,23 @@ def render_report(random: dict[str, Any]) -> str:
         lines.append(
             f"| {k} | {exp_by_k[str(k)]} | {coverage['common_finite_elements']} / "
             f"{coverage['output_elements']} | {number(coverage['common_finite_fraction'])} | "
-            f"{coverage['fp16_rounded_reference_nonfinite']} | "
+            f"{coverage.get('rounded_reference_nonfinite', coverage.get(f'{activation_format}_rounded_reference_nonfinite', 0))} | "
             f"{coverage['conventional_nonfinite']} | {coverage['fp_int_nonfinite']} | "
             f"{'pass' if row['finite_target_met'] else 'fail'} |"
         )
     lines.extend(
         [
             "",
-            "## RMSE / signed error",
-            "",
-            "아래 `mean ± std`는 30개 trial metric의 평균과 sample std다.",
+        "## RMSE / signed error",
+        "",
+        f"전체 Conventional relative L2 / max abs: "
+        f"{number(overall['conventional_err'].get('global_relative_l2_error'))} / "
+        f"{number(overall['conventional_err'].get('global_max_abs_error'))}",
+        f"전체 FPINT relative L2 / max abs: "
+        f"{number(overall['fp_int_err'].get('global_relative_l2_error'))} / "
+        f"{number(overall['fp_int_err'].get('global_max_abs_error'))}",
+        "",
+        "아래 `mean ± std`는 30개 trial metric의 평균과 sample std다.",
             "",
             "| K | Conventional RMSE mean ± std | FPINT RMSE mean ± std | FPINT-Conv | FPINT/Conv | Conventional signed-error std | FPINT signed-error std |",
             "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -268,7 +306,7 @@ def render_report(random: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## FP16 ULP error",
+            f"## {format_label} ULP error",
             "",
             "| K | Conventional mean ULP ± std | FPINT mean ULP ± std | FPINT-Conv | FPINT/Conv | Conventional ULP std | FPINT ULP std | Conventional / FPINT p95 |",
             "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -303,12 +341,71 @@ def render_report(random: dict[str, Any]) -> str:
             f"- FPINT CUDA vs QCOL reference all-close: "
             f"{qcol['cuda_allclose_cases']}/{qcol['cuda_cases']}",
             f"- Conventional reduced-precision reduction: "
-            f"`{random['environment']['allow_fp16_reduced_precision_reduction']}`",
+            f"`{random['environment'].get(f'allow_{activation_format}_reduced_precision_reduction')}`",
             "",
             f"CUDA kernel SHA256: `{random['environment']['fpint_cuda_kernel_sha256']}`",
             "",
             "원본 JSON/CSV에는 case별 seed, field 분포, common finite mask, "
             "Conventional_err와 FP_INT_err가 기록되어 있다.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_model_report(full: dict[str, Any]) -> str:
+    dtype = str(full.get("compute_dtype", "fp16")).upper()
+    micro = full["accuracy_micro"]
+    timing = full["evaluation_seconds_sum"]
+    metadata = full.get("experiment_metadata", {})
+    lines = [
+        "# Model-level GPU QDQ vs FPINT",
+        "",
+        f"- Compute / activation / output dtype: `{dtype}`",
+        "- Weight: symmetric GPTQ INT4, group size 128",
+        "- Scale / accumulator dtype: `FP16` / `FP32`",
+        f"- Quantized checkpoint SHA256: `{full['checkpoint_sha256']}`",
+        f"- Rotation optimization dtype: `{metadata.get('rotation_optimization_dtype')}`",
+        f"- Rotation SHA256: `{metadata.get('rotation_checkpoint_sha256')}`",
+        "- Quality gate: 없음(관측값 보고)",
+        "",
+        "## Accuracy",
+        "",
+        "| Task | Samples | Standard GPU QDQ | FPINT CUDA | Delta (pp) |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for task, row in full["tasks"].items():
+        if row["kind"] != "accuracy":
+            continue
+        lines.append(
+            f"| {task} | {row['samples']} | {100 * row['standard']:.6f}% | "
+            f"{100 * row['fpint_cuda']:.6f}% | "
+            f"{row['delta_percentage_points']:+.6f} |"
+        )
+    lines.extend(
+        [
+            f"| **Micro average** | **{micro['samples']}** | "
+            f"**{100 * micro['standard']:.6f}%** | "
+            f"**{100 * micro['fpint_cuda']:.6f}%** | "
+            f"**{100 * micro['delta_fpint_minus_standard']:+.6f}** |",
+            "",
+            "## WikiText perplexity",
+            "",
+        ]
+    )
+    wikitext = full["tasks"]["wikitext"]
+    lines.extend(
+        [
+            "| Standard GPU QDQ | FPINT CUDA | Absolute delta | Relative delta |",
+            "| ---: | ---: | ---: | ---: |",
+            f"| {wikitext['standard']:.8f} | {wikitext['fpint_cuda']:.8f} | "
+            f"{wikitext['delta_fpint_minus_standard']:+.8f} | "
+            f"{100 * wikitext['relative_delta']:+.6f}% |",
+            "",
+            "## Evaluation time",
+            "",
+            f"- Standard shard time sum: {timing['standard']:.2f} s",
+            f"- FPINT shard time sum: {timing['fpint_cuda']:.2f} s",
             "",
         ]
     )
@@ -341,6 +438,8 @@ def main() -> None:
     elif args.metrics_output is not None:
         parser.error("--metrics-output requires full results")
     report = render_report(random)
+    if full is not None:
+        report = render_model_report(full) + "\n\n" + report
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report, encoding="utf-8")
     print(f"Saved report: {args.output}")

@@ -11,10 +11,13 @@ class FpIntConfig:
     extra_bits: int = 19
     reduce_extra_bits: int = 10
     n_chunk_size: int = 256
+    activation_format: str = "fp16"
 
     def __post_init__(self) -> None:
         if self.weight_bits not in (4, 8):
             raise ValueError("weight_bits must be 4 or 8")
+        if self.activation_format not in ("fp16", "bf16"):
+            raise ValueError("activation_format must be 'fp16' or 'bf16'")
         if self.group_size == 0 or self.group_size < -1:
             raise ValueError("group_size must be -1 or a positive integer")
         if self.mxu_rows <= 0:
@@ -28,10 +31,10 @@ class FpIntConfig:
             raise ValueError("extra_bits must be >= reduce_extra_bits")
         if self.extra_bits < 0 or self.reduce_extra_bits < 0:
             raise ValueError("extra bit widths must be non-negative")
-        # The default has ample headroom: (11+19)-bit activations, an 8-bit
+        # The default has ample headroom: significand+extra-bit activations, an 8-bit
         # weight and a 32-lane sum remain below signed int64. Reject obviously
         # unsafe configurations before an integer tensor can wrap around.
-        worst_main_bits = 11 + self.extra_bits + self.weight_bits + (
+        worst_main_bits = self.significand_bits + self.extra_bits + self.weight_bits + (
             self.mxu_rows - 1
         ).bit_length()
         if worst_main_bits > 53:
@@ -45,6 +48,22 @@ class FpIntConfig:
         if k <= 0:
             raise ValueError("K must be positive")
         return k if self.group_size == -1 else self.group_size
+
+    @property
+    def exponent_bits(self) -> int:
+        return 5 if self.activation_format == "fp16" else 8
+
+    @property
+    def mantissa_bits(self) -> int:
+        return 10 if self.activation_format == "fp16" else 7
+
+    @property
+    def significand_bits(self) -> int:
+        return self.mantissa_bits + 1
+
+    @property
+    def exponent_bias(self) -> int:
+        return 15 if self.activation_format == "fp16" else 127
 
     def group_count(self, k: int) -> int:
         group_size = self.effective_group_size(k)
@@ -62,7 +81,7 @@ class FpIntConfig:
 
     def validate_zero_bound(self, maximum_absolute_zero: int) -> None:
         maximum_weight = 1 << (self.weight_bits - 1)
-        maximum_mantissa = (1 << 11) - 1
+        maximum_mantissa = (1 << self.significand_bits) - 1
         main = (
             (maximum_mantissa << self.extra_bits)
             * maximum_weight

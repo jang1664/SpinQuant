@@ -85,6 +85,35 @@ python summarize_hadamard_comparison.py \
   --zero-padding-dir results/online-had-comparison/zero_padding
 ```
 
+### FP16/BF16 FP×INT numerical accuracy
+
+The FP×INT CUDA backend supports FP16 or BF16 activations/outputs with signed
+INT4/INT8 weights. Quantization scales remain FP16 and K-tile accumulation is
+FP32. Run the BF16×INT4 MXU-row-128 unit experiment with:
+
+```bash
+python measure_fpint_qcol_accuracy.py \
+  --activation-format bf16 --bits 4 --group-size 128 --mxu-rows 128 \
+  --trials 30 --device cuda:0 \
+  --output results/fpint-mxu128-gemm/bf16-int4-reference.json
+```
+
+Run the model-level comparisons with:
+
+```bash
+bash scripts/run_fpint_mxu128_llama31_8b_bf16.sh
+bash scripts/run_fpint_mxu128_llama2_7b_fp16.sh
+```
+
+Both model runners compare standard GPU QDQ Linear and FPINT CUDA using the
+same W4 GPTQ group-128 checkpoint and the same evaluation samples. They resume
+only artifacts whose dtype, backend, checkpoint hash, and kernel hash match.
+The Llama 3.1 runner uses BF16 for rotation optimization, GPTQ, and evaluation;
+the Llama 2 runner uses FP16 for all three stages. A missing dtype-specific
+rotation checkpoint is generated before GPTQ. New rotation directories also
+contain `rotation-metadata.json` with the optimization dtype and `R.bin`
+SHA256; runners validate that sidecar when present.
+
 ### 3. Export to ExecuTorch
 We also support exporting the quantized model to ExecuTorch, which allows us to utilize the quantization kernels and achieve real-time speedup. For more information on kernel implementation details, please see [ExecuTorch](https://pytorch.org/executorch/stable/index.html), and [ExecuTorch with SpinQuant](https://github.com/pytorch/executorch/tree/main/examples/models/llama#spinquant). We currently support 4-bit weight (set group-size to 256 for 8B model and to 32 for smaller model) and 8-bit dynamic activation quantization.
 

@@ -23,6 +23,7 @@ from measure_fpint_qcol_accuracy import (
     parse_exponent_max_map,
     qcol_allclose_metrics,
     run,
+    sample_finite_bf16_fields,
     sample_finite_fp16_fields,
     summarize_records,
 )
@@ -72,6 +73,50 @@ def test_raw_fp16_sampler_uses_all_finite_fields_uniformly():
     assert np.isfinite(values).all()
 
 
+def test_raw_bf16_sampler_uses_all_requested_finite_fields():
+    values = sample_finite_bf16_fields(
+        np.random.default_rng(1), (200_000,), exponent_max=136
+    )
+    bits = values.view(torch.uint16).numpy()
+    sign = bits >> 15
+    exponent = (bits >> 7) & 0xFF
+    mantissa = bits & 0x7F
+    assert (int(sign.min()), int(sign.max())) == (0, 1)
+    assert (int(exponent.min()), int(exponent.max())) == (0, 136)
+    assert (int(mantissa.min()), int(mantissa.max())) == (0, 127)
+    assert bool(torch.isfinite(values).all())
+
+
+def test_bf16_random_qcol_experiment_smoke_cpu():
+    args = argparse.Namespace(
+        bits=4,
+        group_size=128,
+        mxu_rows=128,
+        extra_bits=19,
+        reduce_extra_bits=10,
+        activation_format="bf16",
+        m=4,
+        n=4,
+        k_values=(128,),
+        exponent_max_by_k={128: 136},
+        finite_target=1.0,
+        trials=1,
+        base_seed=17,
+        atol=0.0,
+        rtol=0.0,
+        device="cpu",
+    )
+    result = run(args)
+    assert result["status"] == "pass"
+    assert result["config"]["activation_format"] == "bf16"
+    assert result["config"]["operation"] == "raw_bf16_times_signed_int"
+    assert result["summary"]["overall"]["qcol_correctness"] == {
+        "torch_allclose_cases": 1,
+        "cuda_cases": 0,
+        "cuda_allclose_cases": 0,
+    }
+
+
 def test_raw_fpxint_case_uses_full_int4_and_identity_qparams():
     config = FpIntConfig(4, group_size=128, mxu_rows=128)
     activation, weight, scale, zero = make_case(
@@ -91,7 +136,7 @@ def test_raw_fpxint_case_uses_full_int4_and_identity_qparams():
 def test_exponent_map_parser():
     assert parse_exponent_max_map("128:25,256:24") == {128: 25, 256: 24}
     with pytest.raises(argparse.ArgumentTypeError):
-        parse_exponent_max_map("128:31")
+        parse_exponent_max_map("128:255")
 
 
 def test_cli_exponent_map_uses_internal_field_name(monkeypatch, tmp_path):
