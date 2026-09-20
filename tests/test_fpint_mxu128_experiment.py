@@ -269,6 +269,13 @@ def test_mxu128_runner_has_valid_shell_syntax():
     subprocess.run(["bash", "-n", str(script)], check=True)
 
 
+def test_mxu128_runner_invalidates_stale_fpint_kernel_results():
+    script = Path(__file__).parents[1] / "scripts" / "run_fpint_mxu128_llama31_8b.sh"
+    source = script.read_text(encoding="utf-8")
+    assert 'backend != "fpint_cuda"' in source
+    assert 'metadata.get("fpint_cuda_kernel_sha256") == fpint_kernel_sha256' in source
+
+
 def test_sanity_policy_does_not_gate_on_allclose():
     coverage = {"fpint_linears": 224, "lm_head_backend": "standard"}
     diagnostic = {"allclose": False, "nonfinite": 0}
@@ -373,6 +380,20 @@ def test_full_result_aggregation_rejects_checkpoint_mismatch():
         for tasks in shards
     ]
     with pytest.raises(ValueError, match="different checkpoints"):
+        aggregate_full_results(standard, fpint)
+
+
+def test_full_result_aggregation_rejects_task_batch_mismatch():
+    shards = [
+        ["wikitext"],
+        ["hellaswag"],
+        ["arc_easy", "openbookqa"],
+        ["arc_challenge", "winogrande"],
+    ]
+    standard = [_full_payload("standard", tasks) for tasks in shards]
+    fpint = [_full_payload("fpint_cuda", tasks) for tasks in shards]
+    fpint[1]["spinquant_quantization"]["lm_eval_batch_size"] = "64"
+    with pytest.raises(ValueError, match="hellaswag uses batch 64, expected 32"):
         aggregate_full_results(standard, fpint)
 
 

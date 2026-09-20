@@ -10,14 +10,14 @@
 
 ## Accuracy
 
-| Task | Samples | Batch | Standard GPU QDQ | FPINT CUDA | Delta (pp) |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| hellaswag | 10042 | 32 | 77.703645% | 77.663812% | -0.039833 |
-| arc_easy | 2376 | 32 | 79.377104% | 79.587542% | +0.210438 |
-| arc_challenge | 1172 | 32 | 51.877133% | 51.962457% | +0.085324 |
-| winogrande | 1267 | 32 | 72.217837% | 72.296764% | +0.078927 |
-| openbookqa | 500 | 32 | 43.600000% | 43.400000% | -0.200000 |
-| **Micro average** | **15357** | — | **74.428599%** | **74.441623%** | **+0.013023** |
+| Task | Samples | Standard GPU QDQ | FPINT CUDA | Delta (pp) |
+| --- | ---: | ---: | ---: | ---: |
+| hellaswag | 10042 | 77.703645% | 77.663812% | -0.039833 |
+| arc_easy | 2376 | 79.377104% | 79.587542% | +0.210438 |
+| arc_challenge | 1172 | 51.877133% | 51.962457% | +0.085324 |
+| winogrande | 1267 | 72.217837% | 72.296764% | +0.078927 |
+| openbookqa | 500 | 43.600000% | 43.400000% | -0.200000 |
+| **Micro average** | **15357** | **74.428599%** | **74.441623%** | **+0.013023** |
 
 ## WikiText perplexity
 
@@ -27,8 +27,8 @@
 
 ## Evaluation time
 
-- Standard shard time sum: 371.51 s
-- FPINT shard time sum: 26013.28 s
+- Standard shard time sum: 371.25 s
+- FPINT shard time sum: 30376.22 s
 
 
 # MXU ROW 128 FP64-reference FP×INT 오차 비교
@@ -104,6 +104,6 @@
 - FPINT CUDA vs QCOL reference all-close: 270/270
 - Conventional reduced-precision reduction: `True`
 
-CUDA kernel SHA256: `267945ac381abc66e7075f50e79fe5a28f00188b6673ed921755f05cb424acc4`
+CUDA kernel SHA256: `9df9a6766bc476cca91a6d9a615844e6e5cb104073e03e67871ccf9b6a5add71`
 
 원본 JSON/CSV에는 case별 seed, field 분포, common finite mask, Conventional_err와 FP_INT_err가 기록되어 있다.

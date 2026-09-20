@@ -173,7 +173,7 @@ result_matches() {
     local tasks=$3
     local batch_size=$4
     [[ -s "${result}" ]] || return 1
-    "${PYTHON_BIN}" - "${result}" "${backend}" "${tasks}" "${CHECKPOINT}" "${batch_size}" "${COMPUTE_DTYPE}" "${ROTATION_DTYPE}" "${CHECKPOINT_SHA256}" "${ROTATION_SHA256}" <<'PY'
+    "${PYTHON_BIN}" - "${result}" "${backend}" "${tasks}" "${CHECKPOINT}" "${batch_size}" "${COMPUTE_DTYPE}" "${ROTATION_DTYPE}" "${CHECKPOINT_SHA256}" "${ROTATION_SHA256}" "${FPINT_KERNEL_SHA256}" <<'PY'
 import json
 import sys
 
@@ -187,6 +187,7 @@ import sys
     rotation_dtype,
     checkpoint_sha256,
     rotation_sha256,
+    fpint_kernel_sha256,
 ) = sys.argv[1:]
 with open(path, encoding="utf-8") as handle:
     result = json.load(handle)
@@ -201,6 +202,10 @@ valid = (
     and metadata.get("compute_dtype") == compute_dtype
     and metadata.get("rotation_optimization_dtype") == rotation_dtype
     and metadata.get("rotation_checkpoint_sha256") == rotation_sha256
+    and (
+        backend != "fpint_cuda"
+        or metadata.get("fpint_cuda_kernel_sha256") == fpint_kernel_sha256
+    )
     and metadata.get("fpint_mxu_rows") == 128
     and metadata.get("quantized_checkpoint") == checkpoint
     and (

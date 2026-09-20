@@ -112,7 +112,7 @@ def test_bf16_reference_matches_torch_bit_exact(asymmetric):
     )
 
 
-def test_bf16_wide_exponents_subnormal_and_signed_zero():
+def _bf16_edge_case():
     bits = torch.tensor(
         [0x0000, 0x8000, 0x0001, 0x007F, 0x0080, 0x3F80, 0xBF80, 0x7F7F],
         dtype=torch.uint16,
@@ -124,7 +124,16 @@ def test_bf16_wide_exponents_subnormal_and_signed_zero():
     config = FpIntConfig(
         4, group_size=128, mxu_rows=128, activation_format="bf16"
     )
-    _assert_bf16_reference_matches((activation, weight, scale, zero, config))
+    return activation, weight, scale, zero, config
+
+
+def test_bf16_wide_exponents_subnormal_and_signed_zero():
+    _assert_bf16_reference_matches(_bf16_edge_case())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_bf16_cuda_wide_exponents_subnormal_and_signed_zero_bit_exact():
+    _assert_bf16_reference_matches(_bf16_edge_case(), backend="fpint_cuda")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

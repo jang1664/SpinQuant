@@ -71,6 +71,6 @@
 - FPINT CUDA vs QCOL reference all-close: 270/270
 - Conventional reduced-precision reduction: `True`
 
-CUDA kernel SHA256: `9df9a6766bc476cca91a6d9a615844e6e5cb104073e03e67871ccf9b6a5add71`
+CUDA kernel SHA256: `267945ac381abc66e7075f50e79fe5a28f00188b6673ed921755f05cb424acc4`
 
 원본 JSON/CSV에는 case별 seed, field 분포, common finite mask, Conventional_err와 FP_INT_err가 기록되어 있다.

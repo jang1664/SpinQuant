@@ -76,6 +76,45 @@ __device__ __forceinline__ int64_t align_scalar(
   return negative ? -aligned : aligned;
 }
 
+__device__ __forceinline__ float restore_scaled_integer(
+    const int64_t value, const int binary_exponent) {
+  if (value == 0) {
+    return 0.0f;
+  }
+  const uint64_t magnitude = value < 0
+      ? static_cast<uint64_t>(-(value + 1)) + 1
+      : static_cast<uint64_t>(value);
+  const int value_exponent = 63 - __clzll(magnitude) + binary_exponent;
+  if (value_exponent >= -126) {
+    // Scaling a rounded integer by a power of two is exact while the result is
+    // normal.  This avoids slow FP64 arithmetic on the common model path.
+    return ldexpf(__ll2float_rn(value), binary_exponent);
+  }
+  // Construct a subnormal in units of 2^-149 and round the complete integer
+  // expression once.  This avoids both FP32 double rounding and slow FP64.
+  const int subnormal_shift = binary_exponent + 149;
+  uint64_t fraction;
+  if (subnormal_shift >= 0) {
+    fraction = magnitude << subnormal_shift;
+  } else {
+    const int right_shift = -subnormal_shift;
+    if (right_shift > 64) {
+      fraction = 0;
+    } else if (right_shift == 64) {
+      fraction = magnitude > (uint64_t{1} << 63) ? 1 : 0;
+    } else {
+      fraction = magnitude >> right_shift;
+      const uint64_t remainder =
+          magnitude & ((uint64_t{1} << right_shift) - 1);
+      const uint64_t halfway = uint64_t{1} << (right_shift - 1);
+      fraction += remainder > halfway ||
+          (remainder == halfway && (fraction & 1));
+    }
+  }
+  const uint32_t sign = value < 0 ? 0x80000000u : 0u;
+  return __uint_as_float(sign | static_cast<uint32_t>(fraction));
+}
+
 template <typename scalar_t, int kMantissaBits, int kExponentBits,
           int kExponentBias>
 __global__ void fpint_qcol_kernel(
@@ -210,8 +249,8 @@ __global__ void fpint_qcol_kernel(
         // Preserve the original FP32 scale and K-tile accumulation order.
         const int binary_exponent = maximum_exponents[local_row] -
             kExponentBias - kMantissaBits - extra_bits;
-        float contribution = __fmul_rn(
-            static_cast<float>(post), ldexpf(1.0f, binary_exponent));
+        // Match the RTL int-to-FP conversion as one rounded P * 2^q operation.
+        float contribution = restore_scaled_integer(post, binary_exponent);
         contribution = __fmul_rn(
             contribution, __half2float(scale[column * group_count + group]));
         accumulator = __fadd_rn(accumulator, contribution);

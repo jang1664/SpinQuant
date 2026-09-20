@@ -51,6 +51,10 @@ def file_sha256(path):
 def quantization_metadata(model_args, training_args, ptq_args, model, task_names):
     rotation_source = ptq_args.optimized_rotation_path
     checkpoint_path = ptq_args.load_qmodel_path or ptq_args.save_qmodel_path
+    linear_backend = getattr(ptq_args, "linear_backend", "standard")
+    kernel_path = os.path.join(
+        os.path.dirname(__file__), "fpint_emul", "csrc", "fpint_cuda_kernel.cu"
+    )
     checkpoint_sha256 = os.environ.get("SPINQUANT_CHECKPOINT_SHA256")
     if checkpoint_sha256 is None:
         checkpoint_sha256 = file_sha256(checkpoint_path)
@@ -81,7 +85,10 @@ def quantization_metadata(model_args, training_args, ptq_args, model, task_names
         "attention_backend": getattr(
             model.config, "_attn_implementation", "eager"
         ),
-        "linear_backend": getattr(ptq_args, "linear_backend", "standard"),
+        "linear_backend": linear_backend,
+        "fpint_cuda_kernel_sha256": (
+            file_sha256(kernel_path) if linear_backend == "fpint_cuda" else None
+        ),
         "fpint_mxu_rows": getattr(ptq_args, "fpint_mxu_rows", 32),
         "fpint_extra_bits": getattr(ptq_args, "fpint_extra_bits", 19),
         "fpint_reduce_extra_bits": getattr(

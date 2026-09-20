@@ -19,6 +19,15 @@ TASK_METRICS = {
     "openbookqa": ("acc_norm,none", "accuracy"),
 }
 
+TASK_BATCH_SIZES = {
+    "wikitext": "1",
+    "hellaswag": "32",
+    "arc_easy": "32",
+    "arc_challenge": "32",
+    "winogrande": "32",
+    "openbookqa": "32",
+}
+
 
 def load(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as handle:
@@ -99,7 +108,7 @@ def _collect_results(
             sample_count = payload.get("n-samples", {}).get(task, {}).get("effective")
             if not isinstance(sample_count, int) or sample_count <= 0:
                 raise ValueError(f"{backend} {task} has invalid sample count")
-            expected_batch = "1" if task == "wikitext" else "32"
+            expected_batch = TASK_BATCH_SIZES[task]
             observed_batch = str(metadata.get("lm_eval_batch_size"))
             if observed_batch != expected_batch:
                 raise ValueError(
@@ -175,6 +184,7 @@ def aggregate_full_results(
             "kind": kind,
             "metric": metric_name,
             "samples": standard_task["samples"],
+            "batch_size": standard_task["batch_size"],
             "standard": float(standard_value),
             "fpint_cuda": float(fpint_value),
             "delta_fpint_minus_standard": delta,
@@ -371,20 +381,21 @@ def render_model_report(full: dict[str, Any]) -> str:
         "",
         "## Accuracy",
         "",
-        "| Task | Samples | Standard GPU QDQ | FPINT CUDA | Delta (pp) |",
-        "| --- | ---: | ---: | ---: | ---: |",
+        "| Task | Samples | Batch | Standard GPU QDQ | FPINT CUDA | Delta (pp) |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for task, row in full["tasks"].items():
         if row["kind"] != "accuracy":
             continue
         lines.append(
-            f"| {task} | {row['samples']} | {100 * row['standard']:.6f}% | "
+            f"| {task} | {row['samples']} | {row['batch_size']} | "
+            f"{100 * row['standard']:.6f}% | "
             f"{100 * row['fpint_cuda']:.6f}% | "
             f"{row['delta_percentage_points']:+.6f} |"
         )
     lines.extend(
         [
-            f"| **Micro average** | **{micro['samples']}** | "
+            f"| **Micro average** | **{micro['samples']}** | — | "
             f"**{100 * micro['standard']:.6f}%** | "
             f"**{100 * micro['fpint_cuda']:.6f}%** | "
             f"**{100 * micro['delta_fpint_minus_standard']:+.6f}** |",
