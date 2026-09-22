@@ -1,5 +1,7 @@
 # MXU ROW 128 FPxINT model-level numerical accuracy
 
+[문서 목차](README.md) · 현재 GEMM 실험: [공통 설정·결과](mxu128_scaled_gemm_experiment.md)
+
 ## 요약
 
 Llama 3.1 8B의 224개 quantized Linear를 `QCOL_REAL_2SCOMP` FPINT CUDA

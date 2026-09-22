@@ -19,6 +19,7 @@ from measure_fpint_qcol_accuracy import (
     conventional_linear,
     fp64_reference_linear,
     make_case,
+    sample_scale_fields,
     parse_int_list,
     qcol_allclose_metrics,
     sha256_file,
@@ -30,29 +31,6 @@ DEFAULT_SCALE_MAXIMA = {
     "bf16": (123, 127, 143, 159, 175, 191, 207, 223, 231, 239, *range(240, 255)),
 }
 CANDIDATES = ("fp64", "rounded_reference", "gpu_true", "gpu_false", "fpint")
-
-
-def sample_scale_fields(seed, shape, dtype, exponent_max, exponent_min=0):
-    """Common random numbers: sign/mantissa stay fixed as exponent bounds vary."""
-    mantissa_bits, largest_exponent = (10, 30) if dtype == "fp16" else (7, 254)
-    if dtype not in ("fp16", "bf16"):
-        raise ValueError("scale dtype must be fp16 or bf16")
-    if not 0 <= exponent_min <= exponent_max <= largest_exponent:
-        raise ValueError("scale exponent bounds must contain only finite fields")
-    scale_seed = np.random.SeedSequence(seed).spawn(3)[2]
-    rng = np.random.default_rng(scale_seed)
-    sign = rng.integers(0, 2, size=shape, dtype=np.uint16)
-    # Fixed draw count avoids randint rejection changing subsequent mantissas
-    # when the exponent range changes. floor(U * count) samples integer bins.
-    exponent = (
-        exponent_min + np.floor(rng.random(shape) * (exponent_max - exponent_min + 1))
-    ).astype(np.uint16)
-    mantissa = rng.integers(0, 1 << mantissa_bits, size=shape, dtype=np.uint16)
-    bits = (sign << 15) | (exponent << mantissa_bits) | mantissa
-    result = torch.from_numpy(np.ascontiguousarray(bits)).view(
-        torch.float16 if dtype == "fp16" else torch.bfloat16
-    )
-    return result
 
 
 def tensor_counts(tensor):

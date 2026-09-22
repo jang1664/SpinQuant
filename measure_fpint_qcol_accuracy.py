@@ -145,6 +145,29 @@ def activation_field_stats(activation) -> dict[str, int]:
     }
 
 
+def sample_scale_fields(seed, shape, dtype, exponent_max, exponent_min=0):
+    """Common random numbers: sign/mantissa stay fixed as exponent bounds vary."""
+    mantissa_bits, largest_exponent = (10, 30) if dtype == "fp16" else (7, 254)
+    if dtype not in ("fp16", "bf16"):
+        raise ValueError("scale dtype must be fp16 or bf16")
+    if not 0 <= exponent_min <= exponent_max <= largest_exponent:
+        raise ValueError("scale exponent bounds must contain only finite fields")
+    scale_seed = np.random.SeedSequence(seed).spawn(3)[2]
+    rng = np.random.default_rng(scale_seed)
+    sign = rng.integers(0, 2, size=shape, dtype=np.uint16)
+    # Fixed draw count avoids randint rejection changing subsequent mantissas
+    # when the exponent range changes. floor(U * count) samples integer bins.
+    exponent = (
+        exponent_min + np.floor(rng.random(shape) * (exponent_max - exponent_min + 1))
+    ).astype(np.uint16)
+    mantissa = rng.integers(0, 1 << mantissa_bits, size=shape, dtype=np.uint16)
+    bits = (sign << 15) | (exponent << mantissa_bits) | mantissa
+    result = torch.from_numpy(np.ascontiguousarray(bits)).view(
+        torch.float16 if dtype == "fp16" else torch.bfloat16
+    )
+    return result
+
+
 def make_case(
     *,
     m: int,
@@ -157,6 +180,8 @@ def make_case(
     scale_format: str = "activation",
     scale_log2_min: float = -4.0,
     scale_log2_max: float = 0.0,
+    scale_exp_min: int = 0,
+    scale_exp_max: int | None = None,
 ):
     seed_sequence = np.random.SeedSequence(seed)
     activation_rng, weight_rng, scale_rng = [
@@ -174,6 +199,12 @@ def make_case(
         qmin, qmax + 1, size=(n, k), dtype=np.int16
     ).astype(np.int8)
     groups = config.group_count(k)
+    scale_format = config.activation_format if scale_format == "activation" else scale_format
+    if scale_mode == "raw-fields":
+        if scale_exp_max is None:
+            scale_exp_max = 15 if scale_format == "fp16" else 127
+        scale = sample_scale_fields(seed, (n, groups), scale_format, scale_exp_max, scale_exp_min)
+        return activation, weight, scale, np.zeros((n, groups), dtype=np.int32)
     if scale_mode == "identity":
         scale_values = np.ones((n, groups), dtype=np.float64)
     elif scale_mode == "log-uniform":
@@ -665,6 +696,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         scale_format = activation_format
     scale_log2_min = getattr(args, "scale_log2_min", -4.0)
     scale_log2_max = getattr(args, "scale_log2_max", 0.0)
+    scale_exp_min = getattr(args, "scale_exp_min", 0)
+    scale_exp_max = getattr(args, "scale_exp_max", None)
+    if scale_exp_max is None:
+        scale_exp_max = 15 if scale_format == "fp16" else 127
     config = FpIntConfig(
         weight_bits=args.bits,
         group_size=args.group_size,
@@ -692,6 +727,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 exponent_max=exponent_max,
                 scale_mode=scale_mode, scale_format=scale_format,
                 scale_log2_min=scale_log2_min, scale_log2_max=scale_log2_max,
+                scale_exp_min=scale_exp_min, scale_exp_max=scale_exp_max,
             )
             input_stats = activation_field_stats(activation)
             signs_present = (
@@ -766,6 +802,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "n": args.n,
                     "exponent_max": exponent_max,
                     "input_stats": input_stats,
+                    "input_sha256": hashlib.sha256(
+                        tensors[0].cpu().contiguous().view(torch.int16).numpy().tobytes()
+                        + tensors[1].cpu().numpy().tobytes()
+                    ).hexdigest(),
                     "scale_stats": {
                         "min": float(tensors[2].min()),
                         "max": float(tensors[2].max()),
@@ -837,10 +877,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "identity_scale": 1.0 if scale_mode == "identity" else None,
             "scale_sampling": {
                 "mode": scale_mode, "format": scale_format,
-                "log2_min": scale_log2_min if scale_mode != "identity" else None,
-                "log2_max": scale_log2_max if scale_mode != "identity" else None,
+                "log2_min": scale_log2_min if scale_mode == "log-uniform" else None,
+                "log2_max": scale_log2_max if scale_mode == "log-uniform" else None,
+                "exponent_min": scale_exp_min if scale_mode == "raw-fields" else None,
+                "exponent_max": scale_exp_max if scale_mode == "raw-fields" else None,
+                "sign": [0, 1] if scale_mode == "raw-fields" else None,
+                "mantissa": [0, 1023 if scale_format == "fp16" else 127] if scale_mode == "raw-fields" else None,
                 "granularity": "output_channel_x_k_group",
-                "rounding": "sample in float64 then round to scale dtype",
+                "rounding": "assemble raw fields" if scale_mode == "raw-fields" else "sample in float64 then round to scale dtype",
                 "rng": "third child of numpy SeedSequence(case_seed)",
             },
             "baseline_reduced_precision_modes": [True, False],
@@ -893,7 +937,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--activation-format", choices=("fp16", "bf16"), default="fp16"
     )
-    parser.add_argument("--scale-mode", choices=("identity", "log-uniform"), default="log-uniform")
+    parser.add_argument("--scale-mode", choices=("identity", "log-uniform", "raw-fields"), default="raw-fields")
+    parser.add_argument("--scale-exp-min", type=int, default=0)
+    parser.add_argument("--scale-exp-max", type=int)
     parser.add_argument("--scale-format", choices=("activation", "fp16", "bf16"), default="activation")
     parser.add_argument("--scale-log2-min", type=float, default=-4.0)
     parser.add_argument("--scale-log2-max", type=float, default=0.0)
@@ -915,6 +961,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     scale_format = args.activation_format if args.scale_format == "activation" else args.scale_format
+    if args.scale_exp_max is None:
+        args.scale_exp_max = 15 if scale_format == "fp16" else 127
+    largest_exponent = 30 if scale_format == "fp16" else 254
+    if not 0 <= args.scale_exp_min <= args.scale_exp_max <= largest_exponent:
+        parser.error("scale exponent range must contain finite fields")
     scale_lower, scale_upper = (-24, 15) if scale_format == "fp16" else (-133, 127)
     if not scale_lower <= args.scale_log2_min <= args.scale_log2_max <= scale_upper:
         parser.error(f"scale log2 bounds must satisfy {scale_lower} <= min <= max <= {scale_upper}")

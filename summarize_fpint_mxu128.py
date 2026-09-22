@@ -246,8 +246,16 @@ def render_scaled_report(result: dict[str, Any]) -> str:
         f"S = round_{scale['format']}(2^log2(S))"
         if scale["mode"] == "log-uniform" else f"S=1 ({scale['format']})"
     )
+    if scale["mode"] == "raw-fields":
+        scale_description = (
+            f"{scale['format'].upper()} independent uniform raw fields: "
+            f"sign {scale['sign']}, exponent [{scale['exponent_min']}, {scale['exponent_max']}], "
+            f"mantissa {scale['mantissa']}"
+        )
     lines = [
         f"# MXU ROW {config['mxu_rows']} {dtype}×INT{config['weight_bits']} GEMM accuracy",
+        "",
+        "[문서 목차](README.md)",
         "",
         "실행 명령, raw 파일 위치, 이전 결과와의 차이는 [실험 설명](mxu128_scaled_gemm_experiment.md)을 참조한다.",
         "", "## 설정", "",
@@ -304,13 +312,13 @@ def render_scaled_report(result: dict[str, Any]) -> str:
             lines.append(f"| {k} | " + " | ".join(cells + ratios) + " |")
     lines.extend([
         "", "## 전체 오차", "",
-        "| Candidate | Relative L2 | Max abs | Mean ULP | Max ULP |",
-        "| :--- | ---: | ---: | ---: | ---: |",
+        "| Candidate | Global RMSE | Relative L2 | Max abs | Mean ULP | Max ULP |",
+        "| :--- | ---: | ---: | ---: | ---: | ---: |",
     ])
     for label, key in zip(("GPU True", "GPU False", "FPINT"), candidates):
         row = overall[key]
         lines.append(f"| {label} | " + " | ".join(number(row[metric]) for metric in (
-            "global_relative_l2_error", "global_max_abs_error", "global_mean_ulp", "global_max_ulp"
+            "global_rmse", "global_relative_l2_error", "global_max_abs_error", "global_mean_ulp", "global_max_ulp"
         )) + " |")
     correctness = overall["qcol_correctness"]
     lines.extend([
@@ -326,7 +334,7 @@ def render_scaled_report(result: dict[str, Any]) -> str:
         "", "## 해석 범위", "",
         "- FP16/BF16은 activation exponent의 실제 하한이 다르므로 포맷 간 동일 실수 입력 비교가 아니다.",
         "- K별 exponent 상한이 달라 K 증가와 입력 분포 변화의 영향을 함께 포함한다.",
-        "- Scale RNG의 원본 샘플은 포맷 간 같지만 FP16/BF16 반올림 후 값은 다르다.",
+        "- Scale 분포와 dtype은 위 설정을 따른다. 포맷 간 동일 실수 scale 비교가 아니다.",
         "- Zero-point=0이므로 zero-point 보정 경로와 reduction extra-bit 효과는 이 실험에서 검증하지 않는다.",
         "- 수치 정확도 실험이며 latency/throughput 결과는 포함하지 않는다.", "",
     ])
@@ -471,6 +479,10 @@ def render_model_report(full: dict[str, Any]) -> str:
     metadata = full.get("experiment_metadata", {})
     lines = [
         "# Model-level GPU QDQ vs FPINT",
+        "",
+        "[문서 목차](README.md)",
+        "",
+        "모델 평가 기록이다. 첨부된 GEMM 표는 당시 사전 검증 결과이며, 현재 GEMM 실험은 [전용 문서](mxu128_scaled_gemm_experiment.md)를 참조한다.",
         "",
         f"- Compute / activation / output dtype: `{dtype}`",
         "- Weight: symmetric GPTQ INT4, group size 128",

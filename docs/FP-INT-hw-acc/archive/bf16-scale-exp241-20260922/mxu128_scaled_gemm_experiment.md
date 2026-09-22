@@ -1,8 +1,6 @@
 # FP16/BF16 × INT4 GEMM — 최종 실험 설정
 
-[문서 목차](README.md) · [FP16 상세 결과](mxu128_fp16_int4_gemm_results.md) · [BF16 상세 결과](mxu128_bf16_int4_gemm_results.md)
-
-2026-09-22 현재 수치 정확도 실험 설정이다. BF16 scale의 크기를 제한하기 위해 exponent field 상한을 127로 사용한다.
+2026-09-22 마지막 scale exponent 실험에서 모든 K의 common finite 비율이 99.9% 이상인 설정을 사용한다.
 Activation exponent 상한은 고정하며, 아래 범위는 모두 IEEE 저장 exponent field 값이다.
 
 ## Scale
@@ -10,13 +8,13 @@ Activation exponent 상한은 고정하며, 아래 범위는 모두 IEEE 저장 
 | Dtype | Sign field | Exponent field | Mantissa field |
 | :--- | :--- | :--- | :--- |
 | FP16 | uniform {0,1} | uniform integer [0,15] | uniform integer [0,1023] |
-| BF16 | uniform {0,1} | uniform integer [0,127] | uniform integer [0,127] |
+| BF16 | uniform {0,1} | uniform integer [0,241] | uniform integer [0,127] |
 
 - Sign/exponent/mantissa는 독립적으로 샘플링한다.
 - Activation과 scale의 dtype은 같고, output channel × K-group별로 scale을 생성한다.
 - Scale shape: [N, ceil(K/128)]. 음수·양수·0·subnormal을 포함한다.
 - 정상수의 실제 지수는 field−bias이며 FP16 bias=15, BF16 bias=127이다. Field 0은 zero/subnormal이다.
-- FP16 scale의 절댓값은 2 미만, BF16도 2 미만이다.
+- FP16 scale의 절댓값은 2 미만, BF16은 2^115 미만이다.
 
 ## Activation
 
@@ -54,9 +52,9 @@ Exponent도 아래 범위의 integer uniform으로 독립 샘플링한다.
 | Dtype | Scale EXP field | 전체 common finite | 최악 K의 common finite |
 | :--- | :--- | ---: | ---: |
 | FP16 | [0,15] | 99.9971% | 99.9837% |
-| BF16 | [0,127] | 100.0000% | 100.0000% |
+| BF16 | [0,241] | 99.9939% | 99.9805% |
 
-[FP16 상세 결과](mxu128_fp16_int4_gemm_results.md) · [BF16 상세 결과](mxu128_bf16_int4_gemm_results.md)
+[FP16 상세 결과](../../mxu128_fp16_int4_gemm_results.md) · [BF16 상세 결과](mxu128_bf16_int4_gemm_results.md)
 
 아래 Global RMSE는 모든 K/trial의 공통 finite 원소를 합쳐 `sqrt(sum(error²)/count)`로 계산했다.
 K별 trial RMSE의 mean ± sample std와 ULP는 상세 결과에 기록했다.
@@ -64,21 +62,21 @@ K별 trial RMSE의 mean ± sample std와 ULP는 상세 결과에 기록했다.
 | Dtype | GPU True RMSE | GPU False RMSE | FPINT RMSE |
 | :--- | ---: | ---: | ---: |
 | FP16 | 1.9689629 | 1.7239164 | 1.2978034 |
-| BF16 | 2.3134034 | 2.0287426 | 1.5155897 |
+| BF16 | 3.3853942e34 | 2.9408015e34 | 2.1487500e34 |
 
 | Dtype | GPU True relative L2 | GPU False relative L2 | FPINT relative L2 |
 | :--- | ---: | ---: | ---: |
 | FP16 | 0.00031483496 | 0.00027565230 | 0.00020751730 |
-| BF16 | 0.0025824855 | 0.0022647145 | 0.0016918746 |
+| BF16 | 0.0025910052 | 0.0022507369 | 0.0016445418 |
 
-두 포맷 모두 scale 절댓값은 2 미만이다. 다만 raw exponent 하한의 실제 값과 mantissa 분포가 달라
-동일 실수 scale 분포는 아니다. 범위 축소로 절대 RMSE가 작아진 것은 입력 크기 변화도 반영하므로 알고리즘 개선으로 해석하지 않는다.
+BF16은 scale EXP field 상한 241을 사용하므로 절대 출력 크기와 RMSE가 크다.
+FP16과 동일 실수 scale 분포가 아니며 절대 RMSE를 포맷 간 직접 비교하지 않는다.
 
 - 각 dtype 270 cases 모두 측정했다. Torch/CUDA 각각 독립 QCOL reference와 270/270 cases에서 정확히 일치했다.
 - 540 cases의 activation/weight 및 scale SHA256, common finite 개수가 마지막 sweep의 해당 설정과 일치함을 확인했다.
-- BF16 범위 변경 후 관련 실험 테스트: 44 passed.
-- [FP16 raw JSON](../../results/fpint-final-setting-accuracy/fp16-int4-scaled.json), [CSV](../../results/fpint-final-setting-accuracy/fp16-int4-scaled.csv)
-- [BF16 raw JSON](../../results/fpint-final-setting-accuracy/bf16-int4-scaled.json), [CSV](../../results/fpint-final-setting-accuracy/bf16-int4-scaled.csv)
+- 관련 테스트: 97 passed, 1 skipped. GPU 하나만 노출하여 multi-GPU 테스트는 skip됐다.
+- [FP16 raw JSON](../../../../results/fpint-final-setting-accuracy/fp16-int4-scaled.json), [CSV](../../../../results/fpint-final-setting-accuracy/fp16-int4-scaled.csv)
+- [BF16 raw JSON](../../../../results/fpint-final-setting-accuracy/archive-exp241/bf16-int4-scaled.json), [CSV](../../../../results/fpint-final-setting-accuracy/archive-exp241/bf16-int4-scaled.csv)
 
 ## 재현
 
@@ -100,11 +98,11 @@ python measure_fpint_qcol_accuracy.py \
   --output results/fpint-final-setting-accuracy/fp16-int4-scaled.json
 
 python measure_fpint_qcol_accuracy.py \
-  --activation-format bf16 --scale-mode raw-fields --scale-exp-min 0 --scale-exp-max 127 \
+  --activation-format bf16 --scale-mode raw-fields --scale-exp-min 0 --scale-exp-max 241 \
   --trials 30 --base-seed 20260915 --device cuda:0 \
   --output results/fpint-final-setting-accuracy/bf16-int4-scaled.json
 ```
 
 Scale의 exponent는 동일 U~Uniform[0,1)에서 floor(U×(Emax+1))로 생성한다.
 같은 K/trial의 activation·weight와 scale sign/mantissa는 exponent 범위에 관계없이 동일하다.
-위 명령은 현재 정확도 측정 설정을 재현한다. K 목록·순서는 유지해야 한다.
+위 명령은 마지막 sweep의 해당 설정을 재현한다. K 목록·순서는 유지해야 한다.

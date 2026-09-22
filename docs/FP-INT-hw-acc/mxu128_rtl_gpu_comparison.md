@@ -1,5 +1,9 @@
 # gemm_unit_wrap_opt_v3 RTL vs CUDA FP-INT
 
+[문서 목차](README.md)
+
+아래에 기록한 RTL/CUDA 버전의 검증 결과다. 현재 GEMM scale sampling 변경에 대한 RTL 재검증은 포함하지 않는다.
+
 - Status: **PASS — bit-exact**
 - RTL: `/home/jaeyongjang/project.local/fpint/hw/reconfigurable/rtl/gemm_unit_wrap_opt_v3.sv`
 - RTL SHA256: `4f44f0910352b59916479f973ff57976427e0e79ca471d971adc497c015b2d57`

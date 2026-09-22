@@ -1,5 +1,10 @@
 # Model-level GPU QDQ vs FPINT
 
+[문서 목차](README.md)
+
+이 문서는 모델 평가 기록이다. 아래 포함된 scale=1 GEMM 표는 당시 사전 검증 결과이며,
+현재 GEMM 설정과 RMSE·ULP는 [전용 문서](mxu128_scaled_gemm_experiment.md)를 참조한다.
+
 - Compute / activation / output dtype: `FP16`
 - Weight: symmetric GPTQ INT4, group size 128
 - Scale / accumulator dtype: `FP16` / `FP32`

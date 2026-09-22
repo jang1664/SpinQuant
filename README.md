@@ -87,10 +87,13 @@ python summarize_hadamard_comparison.py \
 
 ### FP16/BF16 FP×INT numerical accuracy
 
+Start with the [experiment documentation index](docs/FP-INT-hw-acc/README.md)
+for current GEMM results, scale sweeps, model evaluations, and archived experiments.
+
 The FP×INT CUDA backend supports FP16 or BF16 activations/outputs with signed
 INT4/INT8 weights and FP16 or BF16 scales. K-tile accumulation is FP32.
 The current GEMM setting samples independent uniform raw scale fields:
-sign `{0,1}`, exponent `[0,15]` for FP16 or `[0,241]` for BF16, and the full
+sign `{0,1}`, exponent `[0,15]` for FP16 or `[0,127]` for BF16, and the full
 mantissa field. Scale dtype matches activation dtype and zero-point remains zero.
 Both GPU reduced-precision reduction **True and False** are measured against
 FPINT with fixed activation bounds. See the

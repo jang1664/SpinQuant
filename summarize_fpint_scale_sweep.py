@@ -54,6 +54,10 @@ def render(results, sources, figures, output):
     lines = [
         "# Scale exponent sweep: fixed activation, signed uniform fields",
         "",
+        "[문서 목차](README.md) · [현재 GEMM 설정](mxu128_scaled_gemm_experiment.md)",
+        "",
+        "이 문서는 범위 탐색 기록이다. BF16 finite 경계 EXP=241과 현재 정확도 실험의 상한 EXP=127은 구분한다.",
+        "",
         "Activation의 기존 K별 exponent 상한을 고정하고 scale exponent field의 상한만 넓힌 실험이다.",
         "Sign과 mantissa는 독립 uniform raw field로 샘플링하며 음수·양수·0·subnormal scale을 포함한다.",
         "이 scale은 양수 quantization scale 분포를 재현하기 위한 것이 아니라 산술 finite 범위를 시험하기 위한 것이다.",

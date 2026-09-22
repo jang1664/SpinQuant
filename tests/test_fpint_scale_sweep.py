@@ -82,3 +82,15 @@ def test_sweep_continues_when_finite_target_not_met(tmp_path):
     write_outputs(result, path)
     assert path.exists() and path.with_suffix(".csv").exists()
     assert path.with_name("sweep-summary.csv").exists()
+
+
+@pytest.mark.parametrize("dtype,maximum", [("fp16", 15), ("bf16", 127)])
+def test_accuracy_raw_fields_reproduce_sweep_scale(dtype, maximum):
+    config = FpIntConfig(4, 128, 128, activation_format=dtype)
+    a, w, scale, zero = make_case(
+        m=4, k=256, n=5, config=config, seed=20260915,
+        exponent_max=config.exponent_bias, scale_mode="raw-fields",
+    )
+    expected = sample_scale_fields(20260915, (5, 2), dtype, maximum)
+    assert torch.equal(scale.view(torch.int16), expected.view(torch.int16))
+    assert not np.any(zero)
