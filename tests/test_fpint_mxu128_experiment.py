@@ -6,7 +6,7 @@ import pytest
 import numpy as np
 import torch
 
-from fpint_emul import FpIntConfig
+from fpint_emul import FpIntConfig, fpint_linear, qcol_real_2scomp_reference
 from measure_fpint_backend_accuracy import (
     PairedLinearObserver,
     TensorErrorAccumulator,
@@ -131,6 +131,113 @@ def test_raw_fpxint_case_uses_full_int4_and_identity_qparams():
     stats = activation_field_stats(activation)
     assert stats["positive_sign_bits"] > 0
     assert stats["negative_sign_bits"] > 0
+
+
+@pytest.mark.parametrize("activation_format", ["fp16", "bf16"])
+@pytest.mark.parametrize("scale_format", ["fp16", "bf16"])
+def test_sampled_scale_matches_all_backends(activation_format, scale_format):
+    config = FpIntConfig(4, group_size=128, mxu_rows=128, activation_format=activation_format)
+    kwargs = dict(m=4, k=257, n=5, config=config, seed=72,
+                  exponent_max=config.exponent_bias, scale_mode="log-uniform",
+                  scale_format=scale_format)
+    case = make_case(**kwargs)
+    repeated = make_case(**kwargs)
+    tensors = tuple(value if isinstance(value, torch.Tensor) else torch.from_numpy(value) for value in case)
+    scale = tensors[2]
+    assert scale.dtype == (torch.float16 if scale_format == "fp16" else torch.bfloat16)
+    assert bool(((scale >= 2**-4) & (scale <= 1)).all())
+    assert scale.unique().numel() > 1
+    assert not tensors[3].any()
+    repeated_scale = repeated[2] if isinstance(repeated[2], torch.Tensor) else torch.from_numpy(repeated[2])
+    assert torch.equal(scale, repeated_scale)
+    expected = torch.from_numpy(qcol_real_2scomp_reference(*case, config)).float()
+    backends = [("fpint_torch", "cpu")]
+    if torch.cuda.is_available():
+        backends += [("fpint_torch", "cuda"), ("fpint_cuda", "cuda")]
+    for backend, device in backends:
+        actual = fpint_linear(*(value.to(device) for value in tensors), config, backend=backend, has_zero=False)
+        torch.testing.assert_close(actual.cpu().float(), expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("group_size", [2, -1])
+def test_scaled_reference_and_baseline_use_group_scales(dtype, group_size):
+    activation = torch.tensor([[1, 2, 3]], dtype=dtype)
+    weight = torch.tensor([[3, -1, 2]], dtype=torch.int8)
+    scale = torch.tensor([[0.3, 0.7]] if group_size == 2 else [[0.3]], dtype=dtype)
+    expanded = [float(scale[0, 0]), float(scale[0, 0]), float(scale[0, -1])]
+    expected = sum(a * w * s for a, w, s in zip([1, 2, 3], [3, -1, 2], expanded))
+    assert fp64_reference_linear(activation, weight, scale, group_size).item() == expected
+    rounded_weight = torch.tensor([[w * s for w, s in zip([3, -1, 2], expanded)]], dtype=dtype)
+    expected_baseline = torch.nn.functional.linear(activation, rounded_weight)
+    for mode in (True, False):
+        assert torch.equal(conventional_linear(activation, weight, scale, group_size, mode), expected_baseline)
+
+
+@pytest.mark.parametrize("dtype,flag", [
+    (torch.float16, "allow_fp16_reduced_precision_reduction"),
+    (torch.bfloat16, "allow_bf16_reduced_precision_reduction"),
+])
+def test_baseline_scopes_reduction_flag_even_on_error(monkeypatch, dtype, flag):
+    original = getattr(torch.backends.cuda.matmul, flag)
+    observed = []
+    def fail(*args):
+        observed.append(getattr(torch.backends.cuda.matmul, flag))
+        raise RuntimeError("injected failure")
+    monkeypatch.setattr(torch.nn.functional, "linear", fail)
+    for mode in (True, False):
+        with pytest.raises(RuntimeError, match="injected failure"):
+            conventional_linear(torch.ones(1, 2, dtype=dtype), torch.ones(1, 2, dtype=torch.int8), reduced_precision=mode)
+        assert getattr(torch.backends.cuda.matmul, flag) == original
+    assert observed == [True, False]
+
+
+def test_three_candidates_share_mask_including_false_baseline():
+    result = paired_error_metrics(
+        torch.tensor([1., 2., float("inf"), 4.]),
+        torch.tensor([1., 2., 3., float("nan")]),
+        torch.tensor([1., 2., 3., 4.], dtype=torch.float64),
+        conventional_full_precision=torch.tensor([1., float("inf"), 3., 4.]),
+    )
+    assert result["coverage"]["common_finite_elements"] == 1
+    assert result["coverage"]["conventional_full_precision_nonfinite"] == 1
+    for key in ("conventional_err", "conventional_full_precision_err", "fp_int_err"):
+        assert result[key]["elements"] == 1
+        assert result[key]["rmse"] == 0
+
+
+def test_sampled_scale_run_and_report_cpu():
+    args = argparse.Namespace(
+        bits=4, group_size=128, mxu_rows=128, extra_bits=19, reduce_extra_bits=10,
+        activation_format="bf16", m=4, n=4, k_values=(128,),
+        exponent_max_by_k={128: 127}, finite_target=1.0, trials=2,
+        base_seed=17, atol=0., rtol=0., device="cpu", scale_mode="log-uniform",
+        scale_format="activation", scale_log2_min=-4., scale_log2_max=0.,
+    )
+    result = run(args)
+    assert result["status"] == "pass"
+    assert result["config"]["scale_sampling"]["format"] == "bf16"
+    assert result["config"]["baseline_reduced_precision_modes"] == [True, False]
+    assert result["summary"]["overall"]["conventional_full_precision_err"]["elements"] == 32
+    report = render_report(result)
+    assert "GPU True" in report and "GPU False" in report
+    assert "Uniform(-4.0, 0.0)" in report
+    assert "2개 trial" in report
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_bf16_scaled_cancellation_preserves_exact_power_of_two_restoration():
+    # CUDA torch.ldexp(1., -19) used to perturb FP32 tie rounding, producing
+    # -462 instead of -464 at [14, 28] after scale and K-tile accumulation.
+    config = FpIntConfig(4, group_size=128, mxu_rows=128, activation_format="bf16")
+    case = make_case(m=32, k=4096, n=32, config=config, seed=20261154,
+                     exponent_max=134, scale_mode="log-uniform")
+    expected = torch.from_numpy(qcol_real_2scomp_reference(*case, config)).float()
+    assert expected[14, 28].item() == -464
+    tensors = tuple((value if isinstance(value, torch.Tensor) else torch.from_numpy(value)).cuda() for value in case)
+    for backend in ("fpint_torch", "fpint_cuda"):
+        actual = fpint_linear(*tensors, config, backend=backend, has_zero=False)
+        torch.testing.assert_close(actual.cpu().float(), expected, atol=0, rtol=0)
 
 
 def test_exponent_map_parser():

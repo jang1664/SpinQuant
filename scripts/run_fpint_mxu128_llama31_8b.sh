@@ -146,6 +146,7 @@ then
     CUDA_VISIBLE_DEVICES="${GPU_IDS[0]}" "${PYTHON_BIN}" measure_fpint_qcol_accuracy.py \
         --bits 4 --group-size 128 --mxu-rows 128 \
         --activation-format "${COMPUTE_DTYPE}" \
+        --scale-mode identity \
         --trials "${RANDOM_TRIALS}" --device cuda:0 \
         --output "${RANDOM_RESULT}" \
         2>&1 | tee "${LOG_ROOT}/random-qcol-fp64-errors.log"

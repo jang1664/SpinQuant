@@ -88,15 +88,19 @@ python summarize_hadamard_comparison.py \
 ### FP16/BF16 FP×INT numerical accuracy
 
 The FP×INT CUDA backend supports FP16 or BF16 activations/outputs with signed
-INT4/INT8 weights. Quantization scales remain FP16 and K-tile accumulation is
-FP32. Run the BF16×INT4 MXU-row-128 unit experiment with:
-
-```bash
-python measure_fpint_qcol_accuracy.py \
-  --activation-format bf16 --bits 4 --group-size 128 --mxu-rows 128 \
-  --trials 30 --device cuda:0 \
-  --output results/fpint-mxu128-gemm/bf16-int4-reference.json
-```
+INT4/INT8 weights and FP16 or BF16 scales. K-tile accumulation is FP32.
+The current GEMM setting samples independent uniform raw scale fields:
+sign `{0,1}`, exponent `[0,15]` for FP16 or `[0,241]` for BF16, and the full
+mantissa field. Scale dtype matches activation dtype and zero-point remains zero.
+Both GPU reduced-precision reduction **True and False** are measured against
+FPINT with fixed activation bounds. See the
+[final settings, results, and reproduction commands](docs/FP-INT-hw-acc/mxu128_scaled_gemm_experiment.md).
+To keep activation bounds fixed and sweep signed raw scale exponent fields,
+run `bash scripts/run_fpint_scale_sweep.sh` in the same environment. This records
+finite/Inf/NaN counts for each path even below the finite target; see the
+[scale exponent sweep](docs/FP-INT-hw-acc/mxu128_scale_exponent_sweep.md).
+Model-level runners retain scale=1 for
+their preliminary random experiment; model weight scales still come from GPTQ.
 
 Run the model-level comparisons with:
 

@@ -120,7 +120,7 @@ template <typename scalar_t, int kMantissaBits, int kExponentBits,
 __global__ void fpint_qcol_kernel(
     const scalar_t* __restrict__ activation,
     const int8_t* __restrict__ weight,
-    const __half* __restrict__ scale,
+    const void* __restrict__ scale,
     const int32_t* __restrict__ zero,
     scalar_t* __restrict__ output,
     const int rows,
@@ -131,7 +131,8 @@ __global__ void fpint_qcol_kernel(
     const int mxu_rows,
     const int extra_bits,
     const int reduce_extra_bits,
-    const bool has_zero) {
+    const bool has_zero,
+    const bool scale_is_bf16) {
   extern __shared__ unsigned char shared_bytes[];
   int64_t* shared_main = reinterpret_cast<int64_t*>(shared_bytes);
   int64_t* shared_reduce = shared_main + kBlockM * mxu_rows;
@@ -251,8 +252,11 @@ __global__ void fpint_qcol_kernel(
             kExponentBias - kMantissaBits - extra_bits;
         // Match the RTL int-to-FP conversion as one rounded P * 2^q operation.
         float contribution = restore_scaled_integer(post, binary_exponent);
-        contribution = __fmul_rn(
-            contribution, __half2float(scale[column * group_count + group]));
+        const int scale_index = column * group_count + group;
+        const float scale_value = scale_is_bf16
+            ? __bfloat162float(static_cast<const __nv_bfloat16*>(scale)[scale_index])
+            : __half2float(static_cast<const __half*>(scale)[scale_index]);
+        contribution = __fmul_rn(contribution, scale_value);
         accumulator = __fadd_rn(accumulator, contribution);
       }
     }
@@ -284,7 +288,8 @@ torch::Tensor fpint_qcol_cuda(
           activation.scalar_type() == at::kBFloat16,
       "activation must be FP16 or BF16");
   TORCH_CHECK(weight.scalar_type() == at::kChar, "weight must be int8");
-  TORCH_CHECK(scale.scalar_type() == at::kHalf, "scale must be FP16");
+  TORCH_CHECK(scale.scalar_type() == at::kHalf || scale.scalar_type() == at::kBFloat16,
+              "scale must be FP16 or BF16");
   TORCH_CHECK(zero.scalar_type() == at::kInt, "zero must be int32");
   TORCH_CHECK(activation.is_contiguous() && weight.is_contiguous() &&
                   scale.is_contiguous() && zero.is_contiguous(),
@@ -324,7 +329,7 @@ torch::Tensor fpint_qcol_cuda(
         <<<grid, block, shared_memory, stream>>>(
             reinterpret_cast<const __half*>(activation.data_ptr<at::Half>()),
             weight.data_ptr<int8_t>(),
-            reinterpret_cast<const __half*>(scale.data_ptr<at::Half>()),
+            scale.data_ptr(),
             zero.data_ptr<int32_t>(),
             reinterpret_cast<__half*>(output.data_ptr<at::Half>()),
             static_cast<int>(rows),
@@ -335,14 +340,14 @@ torch::Tensor fpint_qcol_cuda(
             static_cast<int>(mxu_rows),
             static_cast<int>(extra_bits),
             static_cast<int>(reduce_extra_bits),
-            has_zero);
+            has_zero, scale.scalar_type() == at::kBFloat16);
   } else {
     fpint_qcol_kernel<__nv_bfloat16, 7, 8, 127>
         <<<grid, block, shared_memory, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(
                 activation.data_ptr<at::BFloat16>()),
             weight.data_ptr<int8_t>(),
-            reinterpret_cast<const __half*>(scale.data_ptr<at::Half>()),
+            scale.data_ptr(),
             zero.data_ptr<int32_t>(),
             reinterpret_cast<__nv_bfloat16*>(
                 output.data_ptr<at::BFloat16>()),
@@ -354,7 +359,7 @@ torch::Tensor fpint_qcol_cuda(
             static_cast<int>(mxu_rows),
             static_cast<int>(extra_bits),
             static_cast<int>(reduce_extra_bits),
-            has_zero);
+            has_zero, scale.scalar_type() == at::kBFloat16);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;

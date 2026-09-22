@@ -45,7 +45,8 @@ def _validate_inputs(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     activation = _as_numpy(activation)
     weight = _as_numpy(weight)
-    scale = _as_numpy(scale)
+    scale_is_bf16 = isinstance(scale, torch.Tensor) and scale.dtype == torch.bfloat16
+    scale = _as_numpy(scale.float() if scale_is_bf16 else scale)
     zero = _as_numpy(zero)
     bias = None if bias is None else _as_numpy(bias)
 
@@ -76,10 +77,10 @@ def _validate_inputs(
         )
     n = weight.shape[0]
     expected = (n, config.group_count(k))
-    if scale.dtype != np.float16 or scale.shape != expected:
-        raise TypeError(f"scale must be float16 with shape {expected}")
-    if not np.isfinite(scale).all() or np.any(scale <= 0):
-        raise ValueError("scale must contain finite positive values")
+    if (scale.dtype != np.float16 and not scale_is_bf16) or scale.shape != expected:
+        raise TypeError(f"scale must be float16 or bfloat16 with shape {expected}")
+    if not np.isfinite(scale).all():
+        raise ValueError("scale must contain finite values")
     if zero.dtype not in (np.int16, np.int32, np.int64) or zero.shape != expected:
         raise TypeError(f"zero must be int16/int32/int64 with shape {expected}")
     maximum_zero = int(np.abs(zero.astype(object)).max()) if zero.size else 0

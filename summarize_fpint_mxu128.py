@@ -234,9 +234,110 @@ def aggregate_full_results(
     }
 
 
+def render_scaled_report(result: dict[str, Any]) -> str:
+    """Render all three candidates measured on one common finite mask."""
+    config, environment = result["config"], result["environment"]
+    dtype = config["activation_format"].upper()
+    scale = config["scale_sampling"]
+    overall = result["summary"]["overall"]
+    exponent_map = config[f"{config['activation_format']}_fields"]["exponent_max_by_k"]
+    scale_description = (
+        f"log2(S) ~ Uniform({scale['log2_min']}, {scale['log2_max']}), "
+        f"S = round_{scale['format']}(2^log2(S))"
+        if scale["mode"] == "log-uniform" else f"S=1 ({scale['format']})"
+    )
+    lines = [
+        f"# MXU ROW {config['mxu_rows']} {dtype}×INT{config['weight_bits']} GEMM accuracy",
+        "",
+        "실행 명령, raw 파일 위치, 이전 결과와의 차이는 [실험 설명](mxu128_scaled_gemm_experiment.md)을 참조한다.",
+        "", "## 설정", "",
+        f"- 상태: `{result['status']}`",
+        f"- Shape: M={config['m']}, N={config['n']}; K={config['k_values']}",
+        f"- K당 {config['trials']} trials; base seed={config['base_seed']}",
+        "- Activation: sign/exponent/mantissa raw fields independently uniform; exponent min=0",
+        f"- Signed INT weight: {config['integer_range']} uniform",
+        f"- Scale: {scale_description}; output channel × K-group별 독립 sample",
+        "- Activation/weight/scale RNG는 case seed의 독립 SeedSequence child stream",
+        "- Zero-point=0, bias 없음",
+        f"- MXU rows/group size={config['mxu_rows']}/{config['group_size']}; "
+        f"main/reduction extra bits={config['extra_bits']}/{config['reduce_extra_bits']}",
+        f"- GPU: {environment['device']}; PyTorch {environment['torch']}; CUDA {environment['torch_cuda']}",
+        "", "## 비교 정의", "",
+        "- FP64 reference: A.double() @ (INT.double() × expanded_scale.double()).T",
+        f"- GPU baseline: A @ cast_{dtype}(INT.float() × expanded_scale.float()).T",
+        "- 동일 A/INT/scale에서 reduced-precision reduction=True와 False를 각각 명시적으로 설정",
+        "- 각 baseline 호출 후 원래 reduction 설정 복원; True는 reduced reduction을 허용한다는 뜻이며 실제 사용은 GPU/kernel에 의존",
+        "- FPINT: QCOL_REAL_2SCOMP; MXU tile의 정수 누적을 FP32로 복원하고 scale을 FP32로 곱한 뒤 K 순서로 FP32 누적",
+        "- FP64 reference, rounded reference, baseline True/False, FPINT가 모두 finite인 하나의 공통 mask 사용",
+        "- RMSE: unrounded FP64 reference 기준; ULP: dtype으로 반올림한 FP64 reference와의 representable-value distance",
+        "- Baseline 오차에는 dequantized weight의 dtype 반올림 오차도 포함",
+        f"- 아래 mean ± std는 {config['trials']}개 trial metric의 평균과 sample std(ddof=1)",
+        "", "## Finite coverage", "",
+        "| K | EXP max | Common / total | Fraction | FP64 nonfinite | Rounded ref nonfinite | GPU True nonfinite | GPU False nonfinite | FPINT nonfinite |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for k in config["k_values"]:
+        coverage = result["summary"]["by_k"][str(k)]["coverage"]
+        lines.append(
+            f"| {k} | {exponent_map[str(k)]} | {coverage['common_finite_elements']} / {coverage['output_elements']} | "
+            f"{number(coverage['common_finite_fraction'])} | {coverage['fp64_reference_nonfinite']} | "
+            f"{coverage['rounded_reference_nonfinite']} | {coverage['conventional_nonfinite']} | "
+            f"{coverage['conventional_full_precision_nonfinite']} | {coverage['fp_int_nonfinite']} |"
+        )
+    candidates = ("conventional_err", "conventional_full_precision_err", "fp_int_err")
+    for title, mean_key, std_key in (
+        ("RMSE", "trial_rmse_mean", "trial_rmse_sample_std"),
+        ("Mean ULP", "trial_mean_ulp_mean", "trial_mean_ulp_sample_std"),
+    ):
+        lines.extend([
+            "", f"## {title}", "",
+            "| K | GPU True mean ± std | GPU False mean ± std | FPINT mean ± std | FPINT / True | FPINT / False |",
+            "| ---: | ---: | ---: | ---: | ---: | ---: |",
+        ])
+        for k in config["k_values"]:
+            row = result["summary"]["by_k"][str(k)]
+            cells = [f"{number(row[name][mean_key])} ± {number(row[name][std_key])}" for name in candidates]
+            ratios = [
+                number(row[key][mean_key]["ratio_fp_int_over_conventional"])
+                for key in ("comparison", "full_precision_comparison")
+            ]
+            lines.append(f"| {k} | " + " | ".join(cells + ratios) + " |")
+    lines.extend([
+        "", "## 전체 오차", "",
+        "| Candidate | Relative L2 | Max abs | Mean ULP | Max ULP |",
+        "| :--- | ---: | ---: | ---: | ---: |",
+    ])
+    for label, key in zip(("GPU True", "GPU False", "FPINT"), candidates):
+        row = overall[key]
+        lines.append(f"| {label} | " + " | ".join(number(row[metric]) for metric in (
+            "global_relative_l2_error", "global_max_abs_error", "global_mean_ulp", "global_max_ulp"
+        )) + " |")
+    correctness = overall["qcol_correctness"]
+    lines.extend([
+        "", "## Correctness / 재현", "",
+        f"- Torch vs QCOL reference all-close: {correctness['torch_allclose_cases']}/{overall['cases']}",
+        f"- CUDA vs QCOL reference all-close: {correctness['cuda_allclose_cases']}/{correctness['cuda_cases']}",
+        f"- Tolerance: atol={config['atol']}, rtol={config['rtol']}",
+        f"- K별 common finite fraction target: {config['finite_target']}",
+        f"- CUDA kernel SHA256: `{environment['fpint_cuda_kernel_sha256']}`",
+        f"- Measurement script SHA256: `{environment['measurement_script_sha256']}`",
+        f"- 완료 시각 (UTC): {environment.get('completed_at_utc', 'unknown')}",
+        "- JSON/CSV: case별 seed, 세 candidate 오차, finite coverage; JSON에 scale 범위와 raw-bit SHA256 추가 기록",
+        "", "## 해석 범위", "",
+        "- FP16/BF16은 activation exponent의 실제 하한이 다르므로 포맷 간 동일 실수 입력 비교가 아니다.",
+        "- K별 exponent 상한이 달라 K 증가와 입력 분포 변화의 영향을 함께 포함한다.",
+        "- Scale RNG의 원본 샘플은 포맷 간 같지만 FP16/BF16 반올림 후 값은 다르다.",
+        "- Zero-point=0이므로 zero-point 보정 경로와 reduction extra-bit 효과는 이 실험에서 검증하지 않는다.",
+        "- 수치 정확도 실험이며 latency/throughput 결과는 포함하지 않는다.", "",
+    ])
+    return "\n".join(lines)
+
+
 def render_report(random: dict[str, Any]) -> str:
     """Render the paired FP64-reference numerical experiment."""
 
+    if "baseline_reduced_precision_modes" in random["config"]:
+        return render_scaled_report(random)
     config = random["config"]
     summary = random["summary"]
     overall = summary["overall"]

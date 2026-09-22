@@ -35,12 +35,10 @@ def _validate_inputs(
             f"weight values must be in [{qmin}, {qmax}] for INT{config.weight_bits}"
         )
     expected = (weight.shape[0], config.group_count(k))
-    if scale.dtype != torch.float16 or tuple(scale.shape) != expected:
-        raise TypeError(f"scale must be float16 with shape {expected}")
-    if check_values and (
-        not bool(torch.isfinite(scale).all()) or bool((scale <= 0).any())
-    ):
-        raise ValueError("scale must contain finite positive values")
+    if scale.dtype not in (torch.float16, torch.bfloat16) or tuple(scale.shape) != expected:
+        raise TypeError(f"scale must be float16 or bfloat16 with shape {expected}")
+    if check_values and not bool(torch.isfinite(scale).all()):
+        raise ValueError("scale must contain finite values")
     if zero.dtype not in (torch.int16, torch.int32, torch.int64) or tuple(
         zero.shape
     ) != expected:
@@ -158,10 +156,14 @@ def qcol_real_2scomp_torch(
         group = config.group_for_tile(tile, k)
         a_tile = aligned_main[:, start:end].to(torch.float64)
         exponent = maximum[:, tile].to(torch.int32) - config.exponent_bias
-        factor = torch.ldexp(
-            torch.ones(rows, device=activation.device, dtype=torch.float64),
-            exponent + binary_scale_exponent,
-        ).unsqueeze(1)
+        # Build the exact normal FP64 power of two from its exponent field.
+        # On some CUDA/PyTorch versions ldexp(1., -19) is one FP64 ULP
+        # below 2**-19, changing FP32 tie rounding and eventually BF16 output.
+        # FP16/BF16 exponents and the validated extra-bit bounds keep this
+        # factor well inside the normal FP64 exponent range.
+        factor = (
+            (exponent.to(torch.int64) + binary_scale_exponent + 1023) << 52
+        ).view(torch.float64).unsqueeze(1)
         reduction = None
         if has_zero:
             reduction = aligned_reduce[:, start:end].sum(dim=1, dtype=torch.int64)

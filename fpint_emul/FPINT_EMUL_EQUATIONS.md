@@ -12,6 +12,13 @@
 Scale은 두 format 모두 FP16으로 저장하며 post-scale과 K-tile accumulation은
 FP32, 최종 출력은 activation format과 같은 dtype을 사용한다.
 
+별도 `reference.py`/`torch_backend.py`/CUDA QCOL backend는 FP16뿐 아니라
+BF16 scale도 지원한다. 2026-09-22 GEMM 실험은 activation과 같은 dtype의
+scale을 샘플링하고 FP32로 승격해 post-scale을 수행한다.
+이 문서의 `py/fpint_emul.py` scale 표기는 기존 FP16 경로를 설명한다.
+후속 raw-field scale sweep을 위해 위 QCOL backend는 finite 음수·0 scale도
+지원한다. NaN/Inf scale 입력은 계속 거부하며, 산술 결과의 nonfinite는 실험에서 집계한다.
+
 ## 1. 표기법과 상수
 
 | 기호 | 코드 | 의미 |

@@ -1,5 +1,11 @@
 # MXU ROW 128 FP×INT unit-level numerical accuracy
 
+이 문서는 기존 scale=1 실험 결과를 보존한다. 2026-09-22에 추가한
+FP16/BF16 scale sampling 및 GPU reduced-precision reduction True/False 비교는
+[새 실험 설정](mxu128_scaled_gemm_experiment.md),
+[FP16 결과](mxu128_fp16_int4_gemm_results.md),
+[BF16 결과](mxu128_bf16_int4_gemm_results.md)를 참조한다.
+
 ## 실험 정의
 
 동일한 FP16 activation과 signed INT4 weight로 세 경로를 계산했다.

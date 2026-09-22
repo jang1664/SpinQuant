@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import platform
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -152,10 +153,14 @@ def make_case(
     config: FpIntConfig,
     seed: int,
     exponent_max: int,
+    scale_mode: str = "identity",
+    scale_format: str = "activation",
+    scale_log2_min: float = -4.0,
+    scale_log2_max: float = 0.0,
 ):
     seed_sequence = np.random.SeedSequence(seed)
-    activation_rng, weight_rng = [
-        np.random.default_rng(child) for child in seed_sequence.spawn(2)
+    activation_rng, weight_rng, scale_rng = [
+        np.random.default_rng(child) for child in seed_sequence.spawn(3)
     ]
     sampler = (
         sample_finite_fp16_fields
@@ -169,27 +174,69 @@ def make_case(
         qmin, qmax + 1, size=(n, k), dtype=np.int16
     ).astype(np.int8)
     groups = config.group_count(k)
-    scale = np.ones((n, groups), dtype=np.float16)
+    if scale_mode == "identity":
+        scale_values = np.ones((n, groups), dtype=np.float64)
+    elif scale_mode == "log-uniform":
+        scale_values = np.exp2(scale_rng.uniform(
+            scale_log2_min, scale_log2_max, size=(n, groups)
+        ))
+    else:
+        raise ValueError(f"unknown scale mode: {scale_mode}")
+    scale_format = config.activation_format if scale_format == "activation" else scale_format
+    if scale_format == "fp16":
+        scale = scale_values.astype(np.float16)
+    elif scale_format == "bf16":
+        scale = torch.from_numpy(scale_values).to(torch.bfloat16)
+    else:
+        raise ValueError(f"unknown scale format: {scale_format}")
     zero = np.zeros((n, groups), dtype=np.int32)
     return activation, weight, scale, zero
 
 
 def fp64_reference_linear(
-    activation: torch.Tensor, weight: torch.Tensor
+    activation: torch.Tensor, weight: torch.Tensor,
+    scale: torch.Tensor | None = None, group_size: int = 128,
 ) -> torch.Tensor:
     """GPU/CPU FP64 ground truth; independent of FPINT configuration."""
 
-    return torch.nn.functional.linear(
-        activation.to(torch.float64), weight.to(torch.float64)
-    )
+    weight_fp64 = weight.to(torch.float64)
+    if scale is not None:
+        group_size = weight.shape[1] if group_size == -1 else group_size
+        groups = torch.arange(weight.shape[1], device=weight.device) // group_size
+        weight_fp64 = weight_fp64 * scale[:, groups].to(torch.float64)
+    return torch.nn.functional.linear(activation.to(torch.float64), weight_fp64)
 
 
 def conventional_linear(
-    activation: torch.Tensor, weight: torch.Tensor
+    activation: torch.Tensor, weight: torch.Tensor,
+    scale: torch.Tensor | None = None, group_size: int = 128,
+    reduced_precision: bool | None = None,
 ) -> torch.Tensor:
-    """Actual GPU Linear after converting integer weight to activation dtype."""
+    """GPU Linear with FP32 dequantization then an activation-dtype weight cast.
 
-    return torch.nn.functional.linear(activation, weight.to(activation.dtype))
+    The reduction flag is scoped to this call and restored even on failure.
+    """
+
+    dequantized = weight.to(torch.float32)
+    if scale is not None:
+        group_size = weight.shape[1] if group_size == -1 else group_size
+        groups = torch.arange(weight.shape[1], device=weight.device) // group_size
+        dequantized = dequantized * scale[:, groups].float()
+    dequantized = dequantized.to(activation.dtype)
+    flag = (
+        "allow_fp16_reduced_precision_reduction" if activation.dtype == torch.float16
+        else "allow_bf16_reduced_precision_reduction"
+    )
+    previous = getattr(torch.backends.cuda.matmul, flag)
+    try:
+        if reduced_precision is not None:
+            setattr(torch.backends.cuda.matmul, flag, reduced_precision)
+        output = torch.nn.functional.linear(activation, dequantized)
+        if activation.is_cuda:
+            torch.cuda.synchronize(activation.device)
+        return output
+    finally:
+        setattr(torch.backends.cuda.matmul, flag, previous)
 
 
 def qcol_allclose_metrics(
@@ -326,8 +373,9 @@ def paired_error_metrics(
     fp_int: torch.Tensor,
     reference_fp64: torch.Tensor,
     activation_format: str = "fp16",
+    conventional_full_precision: torch.Tensor | None = None,
 ) -> dict[str, Any]:
-    """Compute both errors on one shared finite-output mask."""
+    """Compute all candidate errors on one shared finite-output mask."""
 
     output_dtype = torch.float16 if activation_format == "fp16" else torch.bfloat16
     conventional = conventional.detach().to(dtype=output_dtype, device="cpu")
@@ -346,6 +394,13 @@ def paired_error_metrics(
         & conventional_finite
         & fp_int_finite
     )
+    if conventional_full_precision is not None:
+        conventional_full_precision = conventional_full_precision.detach().to(
+            dtype=output_dtype, device="cpu"
+        )
+        if conventional_full_precision.shape != reference_fp64.shape:
+            raise ValueError("baseline shapes must match the reference")
+        common_finite &= torch.isfinite(conventional_full_precision)
     total = reference_fp64.numel()
     common = int(common_finite.sum().item())
     coverage = {
@@ -360,7 +415,7 @@ def paired_error_metrics(
         "common_finite_elements": common,
         "common_finite_fraction": common / total if total else None,
     }
-    return {
+    result = {
         "coverage": coverage,
         "conventional_err": _candidate_error_metrics(
             conventional,
@@ -373,6 +428,15 @@ def paired_error_metrics(
             fp_int, reference_fp64, rounded_reference, common_finite, output_dtype
         ),
     }
+    if conventional_full_precision is not None:
+        coverage["conventional_full_precision_nonfinite"] = int(
+            (~torch.isfinite(conventional_full_precision)).sum().item()
+        )
+        result["conventional_full_precision_err"] = _candidate_error_metrics(
+            conventional_full_precision, reference_fp64, rounded_reference,
+            common_finite, output_dtype,
+        )
+    return result
 
 
 def _sample_std(values: list[float]) -> float | None:
@@ -489,7 +553,23 @@ def summarize_records(
         fp_int = _aggregate_error(
             [row["comparisons"]["fp_int_err"] for row in rows]
         )
+        extra = {}
+        if "conventional_full_precision_err" in rows[0]["comparisons"]:
+            full_precision = _aggregate_error([
+                row["comparisons"]["conventional_full_precision_err"] for row in rows
+            ])
+            coverage["conventional_full_precision_nonfinite"] = sum(
+                row["conventional_full_precision_nonfinite"] for row in coverage_rows
+            )
+            extra = {
+                "conventional_full_precision_err": full_precision,
+                "full_precision_comparison": {
+                    metric: _delta_ratio(fp_int[metric], full_precision[metric])
+                    for metric in ("trial_rmse_mean", "trial_mean_ulp_mean")
+                },
+            }
         return {
+            **extra,
             "cases": len(rows),
             "coverage": coverage,
             "finite_target_met": bool(
@@ -579,6 +659,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"extra={sorted(extra)}"
         )
     activation_format = getattr(args, "activation_format", "fp16")
+    scale_mode = getattr(args, "scale_mode", "identity")
+    scale_format = getattr(args, "scale_format", "activation")
+    if scale_format == "activation":
+        scale_format = activation_format
+    scale_log2_min = getattr(args, "scale_log2_min", -4.0)
+    scale_log2_max = getattr(args, "scale_log2_max", 0.0)
     config = FpIntConfig(
         weight_bits=args.bits,
         group_size=args.group_size,
@@ -604,6 +690,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 config=config,
                 seed=seed,
                 exponent_max=exponent_max,
+                scale_mode=scale_mode, scale_format=scale_format,
+                scale_log2_min=scale_log2_min, scale_log2_max=scale_log2_max,
             )
             input_stats = activation_field_stats(activation)
             signs_present = (
@@ -623,7 +711,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             tensors = (
                 activation_tensor,
                 torch.from_numpy(weight).to(device),
-                torch.from_numpy(scale).to(device),
+                (scale if isinstance(scale, torch.Tensor) else torch.from_numpy(scale)).to(device),
                 torch.from_numpy(zero).to(device),
             )
             actual_torch = fpint_linear(
@@ -647,16 +735,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 actual_fp_int = actual_torch
 
-            reference_fp64 = fp64_reference_linear(tensors[0], tensors[1])
-            conventional = conventional_linear(tensors[0], tensors[1])
+            reference_fp64 = fp64_reference_linear(*tensors[:3], config.group_size)
+            conventional = conventional_linear(
+                *tensors[:3], config.group_size, reduced_precision=True
+            )
+            conventional_full_precision = conventional_linear(
+                *tensors[:3], config.group_size, reduced_precision=False
+            )
             numerical = paired_error_metrics(
                 conventional,
                 actual_fp_int,
                 reference_fp64,
                 activation_format=activation_format,
+                conventional_full_precision=conventional_full_precision,
             )
             comparisons["conventional_err"] = numerical["conventional_err"]
             comparisons["fp_int_err"] = numerical["fp_int_err"]
+            comparisons["conventional_full_precision_err"] = numerical["conventional_full_precision_err"]
             all_reference_close &= all(
                 metrics["allclose"]
                 for name, metrics in comparisons.items()
@@ -671,6 +766,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "n": args.n,
                     "exponent_max": exponent_max,
                     "input_stats": input_stats,
+                    "scale_stats": {
+                        "min": float(tensors[2].min()),
+                        "max": float(tensors[2].max()),
+                        "sha256": hashlib.sha256(
+                            tensors[2].cpu().contiguous().view(torch.int16).numpy().tobytes()
+                        ).hexdigest(),
+                    },
                     "coverage": numerical["coverage"],
                     "comparisons": comparisons,
                 }
@@ -693,13 +795,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "status": "pass" if passed else "fail",
         "evaluation_policy": {
-            "fp64_gpu_ground_truth": True,
+            "fp64_gpu_ground_truth": device.type == "cuda",
             "qcol_reference_must_be_allclose": True,
             "common_finite_mask_for_paired_errors": True,
             "minimum_common_finite_fraction_per_k": args.finite_target,
             "candidate_error_ranking_is_diagnostic_only": True,
         },
         "environment": {
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "python": platform.python_version(),
             "numpy": np.__version__,
             "torch": torch.__version__,
@@ -714,6 +817,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if device.type == "cuda"
             else str(device),
             "fpint_cuda_kernel_sha256": sha256_file(kernel_path),
+            "measurement_script_sha256": sha256_file(Path(__file__)),
+            "source_sha256": {
+                name: sha256_file(Path(__file__).parent / name)
+                for name in ("fpint_emul/reference.py", "fpint_emul/torch_backend.py", "fpint_emul/config.py")
+            },
         },
         "config": {
             **vars(config),
@@ -722,8 +830,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 if activation_format == "fp16"
                 else BF16_SAMPLER_VERSION
             ),
-            "operation": f"raw_{activation_format}_times_signed_int",
-            "identity_scale": 1.0,
+            "operation": (
+                f"raw_{activation_format}_times_signed_int" if scale_mode == "identity"
+                else f"{activation_format}_times_scaled_signed_int"
+            ),
+            "identity_scale": 1.0 if scale_mode == "identity" else None,
+            "scale_sampling": {
+                "mode": scale_mode, "format": scale_format,
+                "log2_min": scale_log2_min if scale_mode != "identity" else None,
+                "log2_max": scale_log2_max if scale_mode != "identity" else None,
+                "granularity": "output_channel_x_k_group",
+                "rounding": "sample in float64 then round to scale dtype",
+                "rng": "third child of numpy SeedSequence(case_seed)",
+            },
+            "baseline_reduced_precision_modes": [True, False],
+            "baseline_metric_keys": {
+                "true": "conventional_err", "false": "conventional_full_precision_err",
+            },
             "zero_point": 0,
             "m": args.m,
             "n": args.n,
@@ -747,10 +870,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 (1 << (config.weight_bits - 1)) - 1,
             ],
             "paths": {
-                "fp64_reference": "FP64 activation x FP64-cast integer weight",
+                "fp64_reference": "FP64 activation x (FP64 integer weight * FP64 scale)",
                 "conventional": (
                     f"{activation_format.upper()} activation x "
-                    f"{activation_format.upper()}-cast integer weight"
+                    f"{activation_format.upper()}-cast (FP32 integer weight * FP32 scale)"
                 ),
                 "fp_int": "QCOL_REAL_2SCOMP FPINT CUDA emulation",
             },
@@ -770,6 +893,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--activation-format", choices=("fp16", "bf16"), default="fp16"
     )
+    parser.add_argument("--scale-mode", choices=("identity", "log-uniform"), default="log-uniform")
+    parser.add_argument("--scale-format", choices=("activation", "fp16", "bf16"), default="activation")
+    parser.add_argument("--scale-log2-min", type=float, default=-4.0)
+    parser.add_argument("--scale-log2-max", type=float, default=0.0)
     parser.add_argument("--m", type=int, default=32)
     parser.add_argument("--n", type=int, default=32)
     parser.add_argument("--k-values", type=parse_int_list, default=DEFAULT_K_VALUES)
@@ -787,6 +914,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    scale_format = args.activation_format if args.scale_format == "activation" else args.scale_format
+    scale_lower, scale_upper = (-24, 15) if scale_format == "fp16" else (-133, 127)
+    if not scale_lower <= args.scale_log2_min <= args.scale_log2_max <= scale_upper:
+        parser.error(f"scale log2 bounds must satisfy {scale_lower} <= min <= max <= {scale_upper}")
     if args.exponent_max_by_k is None:
         args.exponent_max_by_k = (
             DEFAULT_EXPONENT_MAX_BY_K
