@@ -112,6 +112,12 @@ bash scripts/run_fpint_mxu128_llama31_8b_bf16.sh
 bash scripts/run_fpint_mxu128_llama2_7b_fp16.sh
 ```
 
+For original, unquantized Llama-2 7B (FP16) and Llama-3.1 8B (BF16), run
+`bash scripts/run_unquantized_llama_baselines.sh` in the `spinquant` environment.
+This uses complete local Hugging Face snapshots and four GPUs, with rotation
+and all quantizers disabled. See the
+[baseline results and reproduction commands](docs/FP-INT-hw-acc/unquantized_llama_baselines.md).
+
 Both model runners compare standard GPU QDQ Linear and FPINT CUDA using the
 same W4 GPTQ group-128 checkpoint and the same evaluation samples. They resume
 only artifacts whose dtype, backend, checkpoint hash, and kernel hash match.
