@@ -33,6 +33,7 @@ bash scripts/run_fpint_scaled_gemm.sh
 
 | 문서 | 범위 |
 | :--- | :--- |
+| [Llama-2 / Llama-3.1 비양자화 baseline](unquantized_llama_baselines.md) | 원본 FP16/BF16, rotation·양자화 없이 측정한 task accuracy·perplexity |
 | [RTL vs CUDA](mxu128_rtl_gpu_comparison.md) | 기록된 RTL/CUDA 버전의 bit-exact 검증. 현재 scale 실험의 재검증 결과는 아님 |
 | [Llama 2 FP16](mxu128_llama2_fp16_model_results.md) | 모델 task accuracy·perplexity·실행 시간 |
 | [Llama 3.1 BF16](mxu128_llama31_bf16_model_results.md) | 모델 task accuracy·perplexity·실행 시간 |
