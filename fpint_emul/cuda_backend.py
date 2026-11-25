@@ -43,6 +43,8 @@ def qcol_real_2scomp_cuda(
 ) -> torch.Tensor:
     """Run the fused CUDA QCOL kernel on arbitrary leading activation dims."""
 
+    if config.quantization_direction != "qcol":
+        raise ValueError("QCOL backend requires quantization_direction='qcol'")
     _validate_inputs(
         activation, weight, scale, zero, bias, config, check_values=validate_values
     )

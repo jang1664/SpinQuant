@@ -34,7 +34,9 @@ def _validate_inputs(
         raise ValueError(
             f"weight values must be in [{qmin}, {qmax}] for INT{config.weight_bits}"
         )
-    expected = (weight.shape[0], config.group_count(k))
+    if k <= 0:
+        raise ValueError("K must be positive")
+    expected = config.parameter_shape(weight.shape[0], k)
     if scale.dtype not in (torch.float16, torch.bfloat16) or tuple(scale.shape) != expected:
         raise TypeError(f"scale must be float16 or bfloat16 with shape {expected}")
     if check_values and not bool(torch.isfinite(scale).all()):
@@ -110,6 +112,8 @@ def qcol_real_2scomp_torch(
 ) -> torch.Tensor:
     """Torch QCOL_REAL_2SCOMP backend with sequential FP32 tile accumulation."""
 
+    if config.quantization_direction != "qcol":
+        raise ValueError("QCOL backend requires quantization_direction='qcol'")
     _validate_inputs(
         activation, weight, scale, zero, bias, config, check_values=validate_values
     )

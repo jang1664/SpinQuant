@@ -1,5 +1,7 @@
 # FP×INT 실험 문서
 
+[QROW backend 사용법과 수치 규칙](qrow_backend.md): CUDA/Torch `qrow_real_2scomp` API 및 검증 범위.
+
 ## 현재 GEMM-level 실험
 
 **[공통 설정과 결과 요약](mxu128_scaled_gemm_experiment.md)**부터 읽고 dtype별 상세 결과를 확인한다.

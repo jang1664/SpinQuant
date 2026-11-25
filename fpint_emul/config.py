@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class FpIntConfig:
-    """Numerical contract for QCOL_REAL_2SCOMP linear emulation."""
+    """Numerical contract for QCOL/QROW real two's-complement emulation."""
 
     weight_bits: int
     group_size: int = 32
@@ -12,8 +12,11 @@ class FpIntConfig:
     reduce_extra_bits: int = 10
     n_chunk_size: int = 256
     activation_format: str = "fp16"
+    quantization_direction: str = "qcol"
 
     def __post_init__(self) -> None:
+        if self.quantization_direction not in ("qcol", "qrow"):
+            raise ValueError("quantization_direction must be 'qcol' or 'qrow'")
         if self.weight_bits not in (4, 8):
             raise ValueError("weight_bits must be 4 or 8")
         if self.activation_format not in ("fp16", "bf16"):
@@ -22,7 +25,8 @@ class FpIntConfig:
             raise ValueError("group_size must be -1 or a positive integer")
         if self.mxu_rows <= 0:
             raise ValueError("mxu_rows must be positive")
-        if self.group_size > 0 and self.group_size % self.mxu_rows != 0:
+        if (self.quantization_direction == "qcol" and self.group_size > 0
+                and self.group_size % self.mxu_rows != 0):
             raise ValueError(
                 "group_size must be a multiple of mxu_rows so a scale boundary "
                 "does not split an MXU reduction tile"
@@ -48,6 +52,12 @@ class FpIntConfig:
         if k <= 0:
             raise ValueError("K must be positive")
         return k if self.group_size == -1 else self.group_size
+
+    def parameter_shape(self, n: int, k: int) -> tuple:
+        if self.quantization_direction == "qrow":
+            groups = 1 if self.group_size == -1 else (n + self.group_size - 1) // self.group_size
+            return (k, groups)
+        return (n, self.group_count(k))
 
     @property
     def exponent_bits(self) -> int:

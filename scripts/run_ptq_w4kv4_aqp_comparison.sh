@@ -43,6 +43,7 @@ COMMON_ARGS=(
     --do_eval True
     --per_device_eval_batch_size "${EVAL_BATCH_SIZE:-4}"
     --model_max_length "${MODEL_MAX_LENGTH:-2048}"
+    --lm_eval_batch_size "${LM_EVAL_BATCH_SIZE:-auto}"
     --fp16 True
     --bf16 False
     --save_safetensors False

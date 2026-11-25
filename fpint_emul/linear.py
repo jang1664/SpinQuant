@@ -14,10 +14,18 @@ def dequantize_weight(
     *,
     dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    """Expand compact QCOL parameters and dequantize to the requested dtype."""
+    """Expand compact QCOL/QROW parameters and dequantize to the requested dtype."""
 
     if weight.ndim != 2:
         raise ValueError("weight must have shape [N, K]")
+    if config.quantization_direction == "qrow":
+        n = weight.shape[0]
+        if n == 0:
+            return weight.to(dtype)
+        width = config.effective_group_size(n)
+        group_index = torch.arange(n, device=weight.device) // width
+        return ((weight.to(torch.int32) - zero[:, group_index].T.to(torch.int32))
+                * scale[:, group_index].T.float()).to(dtype)
     k = weight.shape[1]
     group_size = config.effective_group_size(k)
     group_index = torch.arange(k, device=weight.device) // group_size
@@ -39,6 +47,12 @@ def fpint_linear(
     validate_values: bool = True,
     has_zero=None,
 ) -> torch.Tensor:
+    if config.quantization_direction == "qrow" and backend in ("fpint_torch", "fpint_cuda"):
+        from .qrow import qrow_real_2scomp_cuda, qrow_real_2scomp_torch
+
+        implementation = qrow_real_2scomp_cuda if backend == "fpint_cuda" else qrow_real_2scomp_torch
+        return implementation(activation, weight, scale, zero, config, bias,
+                              validate_values=validate_values, has_zero=has_zero)
     if backend == "fpint_torch":
         return qcol_real_2scomp_torch(
             activation,

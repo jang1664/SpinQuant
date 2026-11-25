@@ -9,6 +9,7 @@ unquantized reference.
 
 | Report | Experiment date | Scope |
 | --- | --- | --- |
+| [Llama-3-8B completed results](llama3-8b.md) | 2026-10-14 | Full FP16 baseline and shared-checkpoint AQP16/AQP8 evaluation; AQP8 word PPL +0.603%, mixed downstream accuracy changes. |
 | [Benchmark comparison](benchmark-comparison.md) | 2026-08-20 | Llama-3.2 3B: WikiText-2 perplexity and five zero-shot accuracy tasks, with AQP16/AQP8/AQP4. |
 | [Matrix-output accuracy](matrix-output-accuracy.md) | 2026-09-10 | Llama-2 7B, Llama-3.1 8B, and Llama-3.2 3B: Linear, QK, and PV errors against FP16 across WikiText, ARC-Challenge, HellaSwag, WinoGrande, C4, and RULER inputs. |
 | [Representative hard workloads](hard-workloads-representative.md) | 2026-08-20 | Small evaluation run comparing FP base, AQP16, and AQP8; not the full hard-workload evaluation. |

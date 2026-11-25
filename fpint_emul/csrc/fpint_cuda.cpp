@@ -11,7 +11,14 @@ torch::Tensor fpint_qcol_cuda(
     int64_t reduce_extra_bits,
     bool has_zero);
 
+torch::Tensor fpint_qrow_cuda(
+    torch::Tensor activation, torch::Tensor weight, torch::Tensor scale,
+    torch::Tensor zero, int64_t group_size, int64_t mxu_rows,
+    int64_t extra_bits, int64_t reduce_extra_bits, bool has_zero);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  module.def("qrow_real_2scomp", &fpint_qrow_cuda,
+             "QROW_REAL_2SCOMP FP16/BF16 x INT CUDA forward");
   module.def(
       "qcol_real_2scomp",
       &fpint_qcol_cuda,

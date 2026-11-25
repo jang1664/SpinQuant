@@ -76,7 +76,7 @@ def _validate_inputs(
             f"weight values must be in [{qmin}, {qmax}] for INT{config.weight_bits}"
         )
     n = weight.shape[0]
-    expected = (n, config.group_count(k))
+    expected = config.parameter_shape(n, k)
     if (scale.dtype != np.float16 and not scale_is_bf16) or scale.shape != expected:
         raise TypeError(f"scale must be float16 or bfloat16 with shape {expected}")
     if not np.isfinite(scale).all():
@@ -139,6 +139,8 @@ def qcol_real_2scomp_reference(
     converted/scaled and then added to the accumulator in FP32 K order.
     """
 
+    if config.quantization_direction != "qcol":
+        raise ValueError("QCOL reference requires quantization_direction='qcol'")
     activation, weight, scale, zero, bias = _validate_inputs(
         activation, weight, scale, zero, bias, config
     )

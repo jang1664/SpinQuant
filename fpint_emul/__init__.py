@@ -14,6 +14,8 @@ from .config import FpIntConfig
 from .linear import dequantize_weight, fpint_linear
 from .reference import qcol_real_2scomp_reference
 from .torch_backend import qcol_real_2scomp_torch
+from .qrow import qrow_real_2scomp_cuda, qrow_real_2scomp_torch
+from .qrow_reference import qrow_real_2scomp_reference
 
 __all__ = _legacy_public + [
     "FpIntConfig",
@@ -21,4 +23,7 @@ __all__ = _legacy_public + [
     "fpint_linear",
     "qcol_real_2scomp_reference",
     "qcol_real_2scomp_torch",
+    "qrow_real_2scomp_cuda",
+    "qrow_real_2scomp_torch",
+    "qrow_real_2scomp_reference",
 ]

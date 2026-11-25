@@ -43,6 +43,19 @@ __device__ __forceinline__ __nv_bfloat16 scalar_zero<__nv_bfloat16>() {
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t scalar_from_float(const float value);
 
+template <typename scalar_t>
+__device__ __forceinline__ float scalar_to_float(const scalar_t value);
+
+template <>
+__device__ __forceinline__ float scalar_to_float<__half>(const __half value) {
+  return __half2float(value);
+}
+
+template <>
+__device__ __forceinline__ float scalar_to_float<__nv_bfloat16>(const __nv_bfloat16 value) {
+  return __bfloat162float(value);
+}
+
 template <>
 __device__ __forceinline__ __half scalar_from_float<__half>(const float value) {
   return __float2half_rn(value);
@@ -268,6 +281,72 @@ __global__ void fpint_qcol_kernel(
   }
 }
 
+// One warp per output. Each lane retains up to eight scaled values, covering
+// an MXU tile of at most 256. QROW scale/zero vary along K; scale is rounded
+// into the activation format BEFORE exponent alignment and integer MAC.
+template <typename scalar_t, int kMantissaBits, int kExponentBits, int kExponentBias>
+__global__ void fpint_qrow_kernel(
+    const scalar_t* activation, const int8_t* weight, const void* scale,
+    const int32_t* zero, scalar_t* output, int64_t outputs, int n, int k,
+    int group_size, int groups, int mxu_rows, int extra_bits,
+    int reduce_extra_bits, bool has_zero, bool scale_is_bf16) {
+  const int lane = threadIdx.x & 31;
+  const int64_t index = static_cast<int64_t>(blockIdx.x) * 4 + threadIdx.x / 32;
+  if (index >= outputs) return;
+  const int64_t row = index / n;
+  const int column = index % n;
+  const int group = group_size == -1 ? 0 : column / group_size;
+  float accumulator = 0.0f;
+  for (int64_t start = 0; start < k; start += mxu_rows) {
+    scalar_t values[8];
+    int maximum = 1;
+    for (int slot = 0; slot < 8; ++slot) {
+      const int offset = lane + slot * 32;
+      const int64_t pos = start + offset;
+      scalar_t value = scalar_zero<scalar_t>();
+      if (offset < mxu_rows && pos < k) {
+        const int64_t si = pos * groups + group;
+        const float s = scale_is_bf16
+            ? __bfloat162float(static_cast<const __nv_bfloat16*>(scale)[si])
+            : __half2float(static_cast<const __half*>(scale)[si]);
+        value = scalar_from_float<scalar_t>(__fmul_rn(scalar_to_float(activation[row * k + pos]), s));
+      }
+      values[slot] = value;
+      maximum = max(maximum, scalar_exponent<scalar_t, kMantissaBits, kExponentBits>(value));
+    }
+    for (int delta = 16; delta; delta >>= 1)
+      maximum = max(maximum, __shfl_xor_sync(0xffffffff, maximum, delta));
+    // Nonfinite prescaled values have no integer-alignment interpretation.
+    // The checked Python API rejects them; unchecked calls produce NaN.
+    if (maximum == (1 << kExponentBits) - 1) {
+      if (lane == 0) output[index] = scalar_from_float<scalar_t>(nanf(""));
+      return;
+    }
+    int64_t inner = 0, correction = 0;
+    for (int slot = 0; slot < 8; ++slot) {
+      const int offset = lane + slot * 32;
+      const int64_t pos = start + offset;
+      if (offset < mxu_rows && pos < k) {
+        inner += align_scalar<scalar_t, kMantissaBits, kExponentBits>(values[slot], maximum, extra_bits)
+            * static_cast<int64_t>(weight[static_cast<int64_t>(column) * k + pos]);
+        if (has_zero)
+          correction += align_scalar<scalar_t, kMantissaBits, kExponentBits>(values[slot], maximum, reduce_extra_bits)
+              * static_cast<int64_t>(zero[pos * groups + group]);
+      }
+    }
+    for (int delta = 16; delta; delta >>= 1) {
+      inner += __shfl_down_sync(0xffffffff, inner, delta);
+      correction += __shfl_down_sync(0xffffffff, correction, delta);
+    }
+    if (lane == 0) {
+      const int64_t post = inner - correction * (int64_t{1} << (extra_bits - reduce_extra_bits));
+      accumulator = __fadd_rn(accumulator, restore_scaled_integer(
+          post, maximum - kExponentBias - kMantissaBits - extra_bits));
+    }
+  }
+  if (lane == 0) output[index] = scalar_from_float<scalar_t>(accumulator);
+}
+
 }  // namespace
 
 torch::Tensor fpint_qcol_cuda(
@@ -361,6 +440,53 @@ torch::Tensor fpint_qcol_cuda(
             static_cast<int>(reduce_extra_bits),
             has_zero, scale.scalar_type() == at::kBFloat16);
   }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+torch::Tensor fpint_qrow_cuda(
+    torch::Tensor activation, torch::Tensor weight, torch::Tensor scale,
+    torch::Tensor zero, int64_t group_size, int64_t mxu_rows,
+    int64_t extra_bits, int64_t reduce_extra_bits, bool has_zero) {
+  TORCH_CHECK(activation.is_cuda() && weight.device() == activation.device() &&
+              scale.device() == activation.device() && zero.device() == activation.device(),
+              "QROW tensors must share a CUDA device");
+  TORCH_CHECK(activation.scalar_type() == at::kHalf || activation.scalar_type() == at::kBFloat16,
+              "activation must be FP16 or BF16");
+  TORCH_CHECK(weight.scalar_type() == at::kChar && zero.scalar_type() == at::kInt,
+              "weight must be int8 and zero must be int32");
+  TORCH_CHECK(scale.scalar_type() == at::kHalf || scale.scalar_type() == at::kBFloat16,
+              "scale must be FP16 or BF16");
+  TORCH_CHECK(activation.dim() == 2 && weight.dim() == 2 && scale.dim() == 2 && zero.dim() == 2,
+              "QROW expects rank-2 tensors");
+  TORCH_CHECK(activation.is_contiguous() && weight.is_contiguous() && scale.is_contiguous() && zero.is_contiguous(),
+              "QROW tensors must be contiguous");
+  TORCH_CHECK(mxu_rows > 0 && mxu_rows <= 256 && reduce_extra_bits >= 0 &&
+              extra_bits >= reduce_extra_bits && extra_bits < 52, "invalid QROW tile/bit widths");
+  TORCH_CHECK(group_size == -1 || (group_size > 0 && group_size <= INT32_MAX), "invalid QROW group size");
+  const int64_t rows = activation.size(0), k = activation.size(1), n = weight.size(0);
+  TORCH_CHECK(k > 0 && k <= INT32_MAX && n <= INT32_MAX && weight.size(1) == k, "invalid QROW matrix shapes");
+  const int64_t groups = group_size == -1 ? 1 : (n + group_size - 1) / group_size;
+  TORCH_CHECK(scale.size(0) == k && scale.size(1) == groups && zero.sizes() == scale.sizes(),
+              "QROW scale/zero must have shape [K, ceil(N/group_size)]");
+  TORCH_CHECK(rows == 0 || n <= (int64_t{INT32_MAX} * 4) / rows, "QROW output exceeds CUDA grid limit");
+  const c10::cuda::CUDAGuard guard(activation.device());
+  auto output = torch::empty({rows, n}, activation.options());
+  if (rows == 0 || n == 0) return output;
+  const dim3 grid((rows * n + 3) / 4), block(128);
+  auto stream = at::cuda::getCurrentCUDAStream(activation.device().index());
+#define LAUNCH_QROW(TYPE, ATYPE, M, E, B) \
+  fpint_qrow_kernel<TYPE, M, E, B><<<grid, block, 0, stream>>>( \
+      reinterpret_cast<const TYPE*>(activation.data_ptr<ATYPE>()), weight.data_ptr<int8_t>(), \
+      scale.data_ptr(), zero.data_ptr<int32_t>(), reinterpret_cast<TYPE*>(output.data_ptr<ATYPE>()), \
+      rows * n, n, k, group_size, groups, mxu_rows, extra_bits, reduce_extra_bits, \
+      has_zero, scale.scalar_type() == at::kBFloat16)
+  if (activation.scalar_type() == at::kHalf) {
+    LAUNCH_QROW(__half, at::Half, 10, 5, 15);
+  } else {
+    LAUNCH_QROW(__nv_bfloat16, at::BFloat16, 7, 8, 127);
+  }
+#undef LAUNCH_QROW
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 }
