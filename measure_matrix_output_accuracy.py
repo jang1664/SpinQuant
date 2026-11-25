@@ -98,30 +98,38 @@ def detach_observer(model: torch.nn.Module, handles: list[Any]) -> None:
         layer.self_attn.matrix_output_observer = None
 
 
-def validate_quantized_configuration(model: torch.nn.Module, bits: int) -> dict[str, Any]:
+def validate_quantized_configuration(
+    model: torch.nn.Module, bits: int | None = None, *,
+    a_bits: int | None = None, q_bits: int | None = None, p_bits: int | None = None,
+) -> dict[str, Any]:
+    a_bits = bits if a_bits is None else a_bits
+    q_bits = bits if q_bits is None else q_bits
+    p_bits = bits if p_bits is None else p_bits
+    if any(not isinstance(value, int) or not 1 <= value <= 16 for value in (a_bits, q_bits, p_bits)):
+        raise ValueError("explicit expected A/Q/P bits are required")
     qlayers = linear_modules(model, quantized=True)
     wrong_linear = {
         name: layer.quantizer.bits
         for name, layer in qlayers.items()
-        if layer.quantizer.bits != bits
+        if layer.quantizer.bits != a_bits
     }
     if wrong_linear:
         raise ValueError(f"unexpected linear activation bits: {wrong_linear}")
     qk_bits = []
-    p_bits = []
+    observed_p = []
     for index, layer in enumerate(model.model.layers):
         attention = layer.self_attn
         wrapper = getattr(attention, "apply_rotary_pos_emb_qk_rotation_wrapper", None)
         observed_q_bits = 16 if wrapper is None else wrapper.q_bits
         observed_p_bits = 16 if attention.p_quantizer is None else attention.p_quantizer.bits
         qk_bits.append(observed_q_bits)
-        p_bits.append(observed_p_bits)
-    if set(qk_bits) != {bits} or set(p_bits) != {bits}:
-        raise ValueError(f"unexpected Q/P bits: Q={set(qk_bits)}, P={set(p_bits)}, expected={bits}")
+        observed_p.append(observed_p_bits)
+    if set(qk_bits) != {q_bits} or set(observed_p) != {p_bits}:
+        raise ValueError(f"unexpected Q/P bits: Q={set(qk_bits)}, P={set(observed_p)}, expected={(q_bits, p_bits)}")
     return {
-        "linear_activation_bits": bits,
+        "linear_activation_bits": a_bits,
         "q_bits_by_layer": qk_bits,
-        "p_bits_by_layer": p_bits,
+        "p_bits_by_layer": observed_p,
         "attention_backend": getattr(model.config, "_attn_implementation", None),
     }
 
